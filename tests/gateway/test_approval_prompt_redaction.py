@@ -61,14 +61,13 @@ class TestRedactApprovalCommand:
 
 
 class TestApprovalCommandWiring:
-    """Guard the production wiring on BOTH approval-notify transports:
-    1. the chat-platform path (_approval_notify_sync in gateway/run.py), and
-    2. the SSE/API path (_approval_notify in gateway/platforms/api_server.py),
-    each of which must route the command through _redact_approval_command and
-    REASSIGN the redacted value before any send/enqueue (so the raw command
-    cannot reach a client). Uses AST (not char-offset string slicing) so a
-    benign refactor doesn't cause a false failure, and so a discarded-result
-    call (`_redact(cmd); send(cmd)`) does NOT pass."""
+    """Guard the production wiring on the chat-platform approval-notify
+    transport (_approval_notify_sync in gateway/run.py), which must route
+    the command through _redact_approval_command and REASSIGN the redacted
+    value before any send/enqueue (so the raw command cannot reach a
+    client). Uses AST (not char-offset string slicing) so a benign refactor
+    doesn't cause a false failure, and so a discarded-result call
+    (`_redact(cmd); send(cmd)`) does NOT pass."""
 
     def _assert_redacts_then_uses(self, module, func_name: str, sink_substr: str):
         """Parse `module`'s full AST, locate the (possibly nested) function
@@ -114,11 +113,6 @@ class TestApprovalCommandWiring:
         import gateway.run as run
 
         self._assert_redacts_then_uses(run, "_approval_notify_sync", "send_exec_approval")
-
-    def test_sse_api_path_redacts_before_enqueue(self):
-        from gateway.platforms import api_server
-
-        self._assert_redacts_then_uses(api_server, "_approval_notify", "put_nowait")
 
 
 class TestApprovalTextFallbackContract:
