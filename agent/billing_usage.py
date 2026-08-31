@@ -243,17 +243,9 @@ def build_usage_model(*, timeout: float = 10.0) -> UsageModel:
     except Exception:
         return UsageModel(available=False)
 
-    try:
-        import concurrent.futures
-
-        from hermes_cli.nous_account import get_nous_portal_account_info
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            account = pool.submit(get_nous_portal_account_info, force_fresh=True).result(timeout=timeout)
-        return usage_model_from_account(account)
-    except Exception:
-        logger.debug("usage ▸ portal fetch failed (fail-open)", exc_info=True)
-        return UsageModel(available=False)
+    # Portal client pruned — nothing to show (fail-open).
+    logger.debug("usage ▸ portal fetch pruned — no account info available")
+    return UsageModel(available=False)
 
 
 # =============================================================================

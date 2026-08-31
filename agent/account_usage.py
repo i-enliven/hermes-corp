@@ -134,107 +134,12 @@ def _is_finite_num(v: Any) -> TypeGuard[float]:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
-def build_nous_credits_snapshot(account_info) -> Optional[AccountUsageSnapshot]:
-    """Map a NousPortalAccountInfo into an AccountUsageSnapshot for /usage.
-
-    Shows dollar magnitudes (subscription / top-up / total) + renewal date + a
-    portal CTA. When the portal supplies a subscription denominator
-    (``monthly_credits``), also emits a subscription-usage window so the renderer
-    shows a real ``% used`` gauge; when it's absent (older portals) the view
-    gracefully degrades to magnitudes-only. Returns None when there's no usable
-    account info to show (fail-open: caller just shows nothing).
-    """
-    try:
-        from hermes_cli.nous_account import nous_portal_topup_url
-
-        if account_info is None or not getattr(account_info, "logged_in", False):
-            return None
-
-        access = getattr(account_info, "paid_service_access_info", None)
-        sub = getattr(account_info, "subscription", None)
-
-        windows: list[AccountUsageWindow] = []
-        details: list[str] = []
-
-        # Subscription usage gauge — only when the portal supplies a positive
-        # monthly_credits denominator AND a finite remaining balance that does
-        # not exceed the cap. Money math is on float dollars (allowed: numeric
-        # account fields, NOT a server-provided *_usd string). used = cap -
-        # remaining; clamp [0,100] so a debt balance (remaining < 0) reads 100%.
-        # Excluded on purpose:
-        #   - non-finite values (NaN/Infinity slip past isinstance and json.loads
-        #     parses bare NaN/Infinity by default) → would render "$nan"/"$inf"
-        #     and a falsely-confident gauge;
-        #   - remaining > cap (rollover balance spanning the period) → monthly_credits
-        #     is no longer a meaningful denominator, and "$X of $Y left" with X>Y
-        #     reads as a contradiction. Both fall back to the magnitudes lines.
-        if sub is not None:
-            monthly_credits = getattr(sub, "monthly_credits", None)
-            sub_remaining = getattr(sub, "credits_remaining", None)
-            if (
-                _is_finite_num(monthly_credits)
-                and monthly_credits > 0
-                and _is_finite_num(sub_remaining)
-                and sub_remaining <= monthly_credits
-            ):
-                used = monthly_credits - sub_remaining
-                used_pct = max(0.0, min(100.0, used / monthly_credits * 100.0))
-                windows.append(
-                    AccountUsageWindow(
-                        label="Subscription",
-                        used_percent=used_pct,
-                        detail=f"{_fmt_usd(sub_remaining)} of {_fmt_usd(monthly_credits)} left",
-                    )
-                )
-
-        if access is not None:
-            sub_credits = getattr(access, "subscription_credits_remaining", None)
-            if _is_finite_num(sub_credits):
-                details.append(f"Subscription credits: {_fmt_usd(sub_credits)}")
-            purchased = getattr(access, "purchased_credits_remaining", None)
-            if _is_finite_num(purchased):
-                details.append(f"Top-up credits: {_fmt_usd(purchased)}")
-            total_usable = getattr(access, "total_usable_credits", None)
-            if _is_finite_num(total_usable):
-                details.append(f"Total usable: {_fmt_usd(total_usable)}")
-
-        if sub is not None:
-            rollover = getattr(sub, "rollover_credits", None)
-            if _is_finite_num(rollover) and rollover > 0:
-                details.append(f"Rollover: {_fmt_usd(rollover)}")
-            period_end = getattr(sub, "current_period_end", None)
-            if period_end:
-                details.append(f"Renews: {period_end}")
-
-        paid = getattr(account_info, "paid_service_access", None)
-        if paid is False:
-            details.append("Status: access depleted — top up to restore")
-
-        if not windows and not details:
-            return None
-
-        details.append(f"Top up: {nous_portal_topup_url(account_info)}")
-        details.append("(or run /topup)")
-
-        plan = getattr(sub, "plan", None) if sub is not None else None
-        return AccountUsageSnapshot(
-            provider="nous",
-            source="portal-account",
-            fetched_at=_utc_now(),
-            title="Nous credits",
-            plan=plan,
-            windows=tuple(windows),
-            details=tuple(details),
-        )
-    except (AttributeError, TypeError):
-        return None
-
 
 def nous_credits_lines(*, markdown: bool = False, timeout: float = 10.0) -> list[str]:
     """Return rendered Nous-credits /usage lines, or [] when there's nothing to show.
 
     Account-independent of any live agent: gated on "a Nous account is logged in"
-    (a cheap local auth-state check), then a wall-clock-bounded portal fetch. Shared
+    (a cheap local auth-state check); the portal fetch path is pruned. Shared
     by the CLI ``_show_usage`` and the TUI ``session.usage`` RPC so both surfaces show
     the same block regardless of session API-call count or resume state. Fail-open:
     any auth/portal hiccup or timeout returns [] (the caller shows nothing).
@@ -262,22 +167,9 @@ def nous_credits_lines(*, markdown: bool = False, timeout: float = 10.0) -> list
             return []
     except Exception:
         return []
-    try:
-        import concurrent.futures
-
-        from hermes_cli.nous_account import get_nous_portal_account_info
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            account = pool.submit(
-                get_nous_portal_account_info, force_fresh=True
-            ).result(timeout=timeout)
-        snapshot = build_nous_credits_snapshot(account)
-        return render_account_usage_lines(snapshot, markdown=markdown)
-    except Exception:
-        # Fail-open (caller shows nothing), but leave a breadcrumb so a dead
-        # /usage credits block is diagnosable in agent.log without a dev flag.
-        logger.debug("credits ▸ /usage portal fetch/render failed (fail-open)", exc_info=True)
-        return []
+    # Portal client pruned — nothing to show (fail-open: caller shows nothing).
+    logger.debug("credits ▸ /usage portal fetch pruned — no account info available")
+    return []
 
 
 def _snapshot_from_credits_state(state) -> Optional[AccountUsageSnapshot]:
@@ -342,7 +234,7 @@ def _snapshot_from_credits_state(state) -> Optional[AccountUsageSnapshot]:
 class CreditsView:
     """Surface-agnostic data for the ``/topup`` balance view.
 
-    One portal fetch, one parse — consumed identically by the CLI panel, the
+    Consumed identically by the CLI panel, the
     gateway button, and any other money surface. Fail-open: when not logged in
     or the portal is unreachable, ``logged_in`` is False / ``topup_url`` is None
     and callers degrade gracefully.
@@ -358,10 +250,8 @@ class CreditsView:
 def build_credits_view(*, markdown: bool = False, timeout: float = 10.0) -> CreditsView:
     """Build the /topup balance view: balance block + identity line + top-up URL.
 
-    Reuses the same account fetch + snapshot + URL builder as the /usage credits
-    block, so the numbers always match. The balance block is the rendered
-    snapshot MINUS its trailing top-up/command-hint lines (the /topup surface
-    supplies its own affordance). Fail-open → ``CreditsView(logged_in=False)``.
+    The portal fetch path is pruned — always fail-open to
+    ``CreditsView(logged_in=False)``.
     """
     not_logged_in = CreditsView(logged_in=False)
     try:
@@ -373,56 +263,9 @@ def build_credits_view(*, markdown: bool = False, timeout: float = 10.0) -> Cred
     except Exception:
         return not_logged_in
 
-    try:
-        import concurrent.futures
-
-        from hermes_cli.nous_account import (
-            get_nous_portal_account_info,
-            nous_portal_topup_url,
-        )
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            account = pool.submit(get_nous_portal_account_info, force_fresh=True).result(
-                timeout=timeout
-            )
-    except Exception:
-        logger.debug("credits ▸ /topup portal fetch failed (fail-open)", exc_info=True)
-        return not_logged_in
-
-    if account is None or not getattr(account, "logged_in", False):
-        return not_logged_in
-
-    snapshot = build_nous_credits_snapshot(account)
-    # Balance lines = the snapshot block minus the two trailing affordance lines
-    # ("Top up: <url>" + "(or run /topup)") that build_nous_credits_snapshot
-    # appends for the /usage surface. /topup renders its own button/panel.
-    balance_lines: list[str] = []
-    if snapshot is not None:
-        rendered = render_account_usage_lines(snapshot, markdown=markdown)
-        balance_lines = [
-            line
-            for line in rendered
-            if not line.lstrip().startswith("Top up:")
-            and not line.lstrip().startswith("(or run")
-        ]
-
-    # Identity line — shown before any open (roadmap §4.4).
-    email = getattr(account, "email", None)
-    org_name = getattr(account, "org_name", None)
-    who: list[str] = []
-    if email:
-        who.append(str(email))
-    if org_name:
-        who.append(f"org {org_name}")
-    identity_line = ("Topping up as " + " / ".join(who)) if who else None
-
-    return CreditsView(
-        logged_in=True,
-        balance_lines=tuple(balance_lines),
-        identity_line=identity_line,
-        topup_url=nous_portal_topup_url(account),
-        depleted=getattr(account, "paid_service_access", None) is False,
-    )
+    # Portal client pruned — nothing to show (fail-open → not_logged_in).
+    logger.debug("credits ▸ /topup portal fetch pruned — no account info available")
+    return not_logged_in
 
 
 def _codex_backend_urls(base_url: str) -> tuple[str, str, str]:

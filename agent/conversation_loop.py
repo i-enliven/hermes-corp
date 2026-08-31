@@ -472,20 +472,8 @@ def _ra():
 
 
 def _nous_entitlement_message(capability: str) -> str:
-    try:
-        from hermes_cli.nous_account import (
-            format_nous_portal_entitlement_message,
-            get_nous_portal_account_info,
-        )
-
-        account_info = get_nous_portal_account_info(force_fresh=True)
-        message = format_nous_portal_entitlement_message(
-            account_info,
-            capability=capability,
-        )
-        return message or ""
-    except Exception:
-        return ""
+    # Portal client pruned — no entitlement message available (fail-open).
+    return ""
 
 
 def _print_nous_entitlement_guidance(agent, capability: str) -> bool:
@@ -718,17 +706,8 @@ def _print_billing_or_entitlement_guidance(
 
 def _try_refresh_nous_paid_entitlement_credentials(agent) -> bool:
     """Refresh Nous runtime credentials after a fresh paid-entitlement check."""
-    try:
-        from hermes_cli.nous_account import get_nous_portal_account_info
-
-        account_info = get_nous_portal_account_info(force_fresh=True)
-        if account_info.paid_service_access is not True:
-            return False
-        return agent._try_refresh_nous_client_credentials(
-            force=True,
-        )
-    except Exception:
-        return False
+    # Portal client pruned — refresh is a no-op (fail-open).
+    return False
 
 
 def _restore_or_build_system_prompt(agent, system_message, conversation_history):

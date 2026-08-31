@@ -7279,17 +7279,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         # 2. Replace untouched default with a Codex model
         if self._model_is_default:
+            # Codex model-id probe: on any failure the static
+            # gpt-5.3-codex fallback applies (the except path, made explicit).
             fallback_model = "gpt-5.3-codex"
             try:
                 from hermes_cli.codex_models import get_codex_model_ids
-
                 available = get_codex_model_ids(
                     access_token=self.api_key if self.api_key else None,
                 )
                 if available:
                     fallback_model = available[0]
             except Exception:
-                pass
+                fallback_model = "gpt-5.3-codex"
 
             if current_model != fallback_model:
                 self.model = fallback_model

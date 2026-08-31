@@ -22,8 +22,6 @@ import copy
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from hermes_cli.nous_subscription import get_nous_subscription_features
-from tools.tool_backend_helpers import managed_nous_tools_enabled
 from hermes_constants import get_optional_skills_dir
 
 logger = logging.getLogger(__name__)
@@ -419,7 +417,8 @@ def _print_setup_summary(config: dict, hermes_home):
     print_header("Tool Availability Summary")
 
     tool_status = []
-    subscription_features = get_nous_subscription_features(config)
+    # Nous subscription client pruned — no managed-feature rows in the summary.
+    subscription_features = None
 
     # Vision — use the same runtime resolver as the actual vision tools
     try:
@@ -436,9 +435,9 @@ def _print_setup_summary(config: dict, hermes_home):
 
 
     # Web tools (Exa, Parallel, Firecrawl, or Tavily)
-    if subscription_features.web.managed_by_nous:
+    if subscription_features is not None and subscription_features.web.managed_by_nous:
         tool_status.append(("Web Search & Extract (Nous subscription)", True, None))
-    elif subscription_features.web.available:
+    elif subscription_features is not None and subscription_features.web.available:
         label = "Web Search & Extract"
         if subscription_features.web.current_provider:
             label = f"Web Search & Extract ({subscription_features.web.current_provider})"
@@ -447,10 +446,13 @@ def _print_setup_summary(config: dict, hermes_home):
         tool_status.append(("Web Search & Extract", False, "EXA_API_KEY, PARALLEL_API_KEY, FIRECRAWL_API_KEY/FIRECRAWL_API_URL, TAVILY_API_KEY, or SEARXNG_URL"))
 
     # Browser tools (local Chromium, Camofox, Browserbase, Browser Use, or Firecrawl)
-    browser_provider = subscription_features.browser.current_provider
-    if subscription_features.browser.managed_by_nous:
+    browser_provider = (
+        subscription_features.browser.current_provider
+        if subscription_features is not None else ""
+    )
+    if subscription_features is not None and subscription_features.browser.managed_by_nous:
         tool_status.append(("Browser Automation (Nous Browser Use)", True, None))
-    elif subscription_features.browser.available:
+    elif subscription_features is not None and subscription_features.browser.available:
         label = "Browser Automation"
         if browser_provider:
             label = f"Browser Automation ({browser_provider})"
@@ -478,9 +480,9 @@ def _print_setup_summary(config: dict, hermes_home):
 
     # Image generation — FAL (direct or via Nous), or any plugin-registered
     # provider (OpenAI, etc.)
-    if subscription_features.image_gen.managed_by_nous:
+    if subscription_features is not None and subscription_features.image_gen.managed_by_nous:
         tool_status.append(("Image Generation (Nous subscription)", True, None))
-    elif subscription_features.image_gen.available:
+    elif subscription_features is not None and subscription_features.image_gen.available:
         tool_status.append(("Image Generation", True, None))
     else:
         # Fall back to probing plugin-registered providers so OpenAI-only
@@ -510,7 +512,7 @@ def _print_setup_summary(config: dict, hermes_home):
     # Video generation — opt-in via `hermes tools` → Video Generation.
     # Only show the row when a plugin reports available so we don't badger
     # users who don't care about video gen with a "missing" status line.
-    if subscription_features.video_gen.managed_by_nous:
+    if subscription_features is not None and subscription_features.video_gen.managed_by_nous:
         tool_status.append(("Video Generation (FAL via Nous subscription)", True, None))
     else:
         try:
@@ -532,7 +534,7 @@ def _print_setup_summary(config: dict, hermes_home):
 
     # TTS — show configured provider
     tts_provider = cfg_get(config, "tts", "provider", default="edge")
-    if subscription_features.tts.managed_by_nous:
+    if subscription_features is not None and subscription_features.tts.managed_by_nous:
         tool_status.append(("Text-to-Speech (OpenAI via Nous subscription)", True, None))
     elif tts_provider == "elevenlabs" and get_env_value("ELEVENLABS_API_KEY"):
         tool_status.append(("Text-to-Speech (ElevenLabs)", True, None))
@@ -569,7 +571,10 @@ def _print_setup_summary(config: dict, hermes_home):
 
     # STT — show configured provider
     stt_provider = cfg_get(config, "stt", "provider", default="local") or "local"
-    _stt_feature = subscription_features.features.get("stt")
+    _stt_feature = (
+        subscription_features.features.get("stt")
+        if subscription_features is not None else None
+    )
     if _stt_feature is not None and _stt_feature.managed_by_nous:
         tool_status.append(("Speech-to-Text (OpenAI via Nous subscription)", True, None))
     elif stt_provider == "openai" and (
@@ -596,14 +601,14 @@ def _print_setup_summary(config: dict, hermes_home):
                 ("Speech-to-Text (Local Whisper — not installed)", False, "run 'hermes tools' → Speech-to-Text")
             )
 
-    if subscription_features.modal.managed_by_nous:
+    if subscription_features is not None and subscription_features.modal.managed_by_nous:
         tool_status.append(("Modal Execution (Nous subscription)", True, None))
     elif cfg_get(config, "terminal", "backend") == "modal":
-        if subscription_features.modal.direct_override:
+        if subscription_features is not None and subscription_features.modal.direct_override:
             tool_status.append(("Modal Execution (direct Modal)", True, None))
         else:
             tool_status.append(("Modal Execution", False, "run 'hermes setup terminal'"))
-    elif managed_nous_tools_enabled() and subscription_features.nous_auth_present:
+    elif subscription_features is not None and subscription_features.nous_auth_present:
         tool_status.append(("Modal Execution (optional via Nous subscription)", True, None))
 
     # Home Assistant
@@ -1078,7 +1083,8 @@ def _setup_tts_provider(config: dict):
     """Interactive TTS provider selection with install flow for NeuTTS."""
     tts_config = config.get("tts", {})
     current_provider = tts_config.get("provider", "edge")
-    subscription_features = get_nous_subscription_features(config)
+    # Nous subscription client pruned — managed TTS option unavailable.
+    subscription_features = None
 
     provider_labels = {
         "edge": "Edge TTS",
@@ -1100,7 +1106,7 @@ def _setup_tts_provider(config: dict):
 
     choices = []
     providers = []
-    if managed_nous_tools_enabled() and subscription_features.nous_auth_present:
+    if subscription_features is not None and subscription_features.nous_auth_present:
         choices.append("Nous Subscription (managed OpenAI TTS, billed to your subscription)")
         providers.append("nous-openai")
     choices.extend(
@@ -1438,12 +1444,8 @@ def setup_terminal_backend(config: dict):
         from tools.managed_tool_gateway import is_managed_tool_gateway_ready
         from tools.tool_backend_helpers import normalize_modal_mode
 
-        managed_modal_available = bool(
-            managed_nous_tools_enabled()
-            and
-            get_nous_subscription_features(config).nous_auth_present
-            and is_managed_tool_gateway_ready("modal")
-        )
+        # Nous subscription client pruned — managed Modal unavailable.
+        managed_modal_available = False
         modal_mode = normalize_modal_mode(cfg_get(config, "terminal", "modal_mode"))
         use_managed_modal = False
         if managed_modal_available:

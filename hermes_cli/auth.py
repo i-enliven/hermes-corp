@@ -997,21 +997,8 @@ def format_auth_error(error: Exception) -> str:
 
 
 def _format_nous_entitlement_auth_error(error: AuthError) -> str:
-    try:
-        from hermes_cli.nous_account import (
-            format_nous_portal_entitlement_message,
-            get_nous_portal_account_info,
-        )
-
-        account_info = get_nous_portal_account_info(force_fresh=True)
-        message = format_nous_portal_entitlement_message(
-            account_info,
-            capability="Nous model access",
-        )
-        if message:
-            return message
-    except Exception:
-        pass
+    # Portal account client pruned — the account-aware message is unavailable;
+    # always take the plain fallback guidance.
     return f"{error} Check credits or billing in Nous Portal, then retry."
 
 
@@ -9241,22 +9228,8 @@ def _login_nous(args, pconfig: ProviderConfig) -> None:
                 free_tier = check_nous_free_tier(force_fresh=True)
                 _portal_for_recs = auth_state.get("portal_base_url", "")
                 if free_tier:
-                    try:
-                        from hermes_cli.nous_account import (
-                            format_nous_portal_entitlement_message,
-                            get_nous_portal_account_info,
-                        )
-
-                        _account_info = get_nous_portal_account_info(force_fresh=True)
-                        unavailable_message = (
-                            format_nous_portal_entitlement_message(
-                                _account_info,
-                                capability="paid Nous models",
-                            )
-                            or ""
-                        )
-                    except Exception:
-                        unavailable_message = ""
+                    # Portal account client pruned — no entitlement message.
+                    unavailable_message = ""
                     # The Portal's freeRecommendedModels endpoint is the
                     # source of truth for what's free *right now*. Augment
                     # the curated list with anything new the Portal flags

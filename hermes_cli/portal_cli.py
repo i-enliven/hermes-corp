@@ -34,7 +34,6 @@ DOCS_URL = "https://hermes-agent.nousresearch.com/docs/user-guide/features/tool-
 def _cmd_status(args) -> int:
     """Show Portal auth + Tool Gateway routing summary."""
     from hermes_cli.auth import get_nous_auth_status_local
-    from hermes_cli.nous_subscription import get_nous_subscription_features
 
     config = load_config() or {}
 
@@ -73,34 +72,9 @@ def _cmd_status(args) -> int:
     print()
     print(color("  Tool Gateway", Colors.MAGENTA))
     print(color("  ────────────", Colors.MAGENTA))
-    try:
-        features = get_nous_subscription_features(config)
-    except Exception:
-        features = None
-
-    if features is None:
-        print("  (could not resolve subscription state)")
-        return 0
-
-    rows = []
-    for feat in features.items():
-        if feat.managed_by_nous:
-            state = color("via Nous Portal", Colors.GREEN)
-        elif feat.active and feat.current_provider:
-            state = feat.current_provider
-        elif feat.active:
-            state = "active"
-        else:
-            state = color("not configured", Colors.DIM)
-        rows.append((feat.label, state))
-
-    width = max((len(r[0]) for r in rows), default=0)
-    for label, state in rows:
-        print(f"  {label:<{width}}   {state}")
-
-    if not logged_in:
-        print()
-        print(color(f"  Docs: {DOCS_URL}", Colors.DIM))
+    # Subscription client pruned — Tool Gateway routing state is unavailable
+    # (fail-open: status still renders the auth/provider rows).
+    print("  (could not resolve subscription state)")
     return 0
 
 
@@ -121,51 +95,10 @@ def _cmd_open(args) -> int:
 
 def _cmd_tools(args) -> int:
     """List the Tool Gateway catalog + current routing."""
-    from hermes_cli.nous_subscription import get_nous_subscription_features
-
-    config = load_config() or {}
-    try:
-        features = get_nous_subscription_features(config)
-    except Exception:
-        print("Could not resolve Tool Gateway state.", file=sys.stderr)
-        return 1
-
-    # Static catalog — the partners Tool Gateway routes to today.
-    catalog = [
-        ("web",       "Web search & extract",  "Firecrawl"),
-        ("image_gen", "Image generation",      "FAL"),
-        ("tts",       "Text-to-speech",        "OpenAI TTS"),
-        ("browser",   "Browser automation",    "Browser Use"),
-        ("modal",     "Cloud terminal",        "Modal"),
-    ]
-
-    print()
-    print(color("  Tool Gateway catalog", Colors.MAGENTA))
-    print(color("  ────────────────────", Colors.MAGENTA))
-
-    if not features.nous_auth_present:
-        print(color("  Not logged into Nous Portal — sign in with `hermes portal`.", Colors.YELLOW))
-        print()
-
-    label_width = max(len(label) for _, label, _ in catalog)
-    for key, label, partner in catalog:
-        feat = features.features.get(key)
-        if feat is None:
-            state = color("unknown", Colors.DIM)
-        elif feat.managed_by_nous:
-            state = color("✓ via Nous Portal", Colors.GREEN)
-        elif feat.active and feat.current_provider:
-            state = feat.current_provider
-        elif feat.active:
-            state = "active"
-        else:
-            state = color("not configured", Colors.DIM)
-        print(f"  {label:<{label_width}}  partner: {partner:<14} {state}")
-
-    print()
-    print(color(f"  Manage your subscription: {SUBSCRIPTION_URL}", Colors.DIM))
-    print(color(f"  Docs: {DOCS_URL}", Colors.DIM))
-    return 0
+    # Subscription client pruned — Tool Gateway routing state is unavailable
+    # (fail-open: catalog still renders, all rows shown as not configured).
+    print("Could not resolve Tool Gateway state.", file=sys.stderr)
+    return 1
 
 
 def _cmd_login(args) -> int:

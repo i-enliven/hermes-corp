@@ -30,18 +30,9 @@ def managed_nous_tools_enabled(*, force_fresh: bool = False) -> bool:
     ``force_fresh=True`` is for interactive configuration flows that should
     reflect a just-purchased subscription, credits, or pool grant immediately.
     """
-    try:
-        from hermes_cli.nous_account import get_nous_portal_account_info
-
-        if force_fresh:
-            account_info = get_nous_portal_account_info(force_fresh=True)
-        else:
-            account_info = get_nous_portal_account_info()
-        if not account_info.logged_in:
-            return False
-        return account_info.tool_gateway_entitled
-    except Exception:
-        return False
+    # Portal account client pruned — Tool Gateway entitlement is unavailable
+    # and fails closed (never block startup).
+    return False
 
 
 def nous_tool_gateway_unavailable_message(
@@ -50,21 +41,8 @@ def nous_tool_gateway_unavailable_message(
     force_fresh: bool = False,
 ) -> str:
     """Return account-aware guidance for an unavailable Nous Tool Gateway path."""
-    try:
-        from hermes_cli.nous_account import (
-            format_nous_portal_entitlement_message,
-            get_nous_portal_account_info,
-        )
-
-        account_info = get_nous_portal_account_info(force_fresh=force_fresh)
-        message = format_nous_portal_entitlement_message(
-            account_info,
-            capability=capability,
-        )
-        if message:
-            return message
-    except Exception:
-        pass
+    # Portal account client pruned — no account-aware message available; take
+    # the plain fallback below unconditionally.
     return (
         f"{capability} is unavailable. Run `hermes model` to refresh your "
         "Nous Portal login and billing status."

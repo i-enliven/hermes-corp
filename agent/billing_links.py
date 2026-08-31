@@ -79,12 +79,8 @@ def is_nous_inference_route(provider: str, base_url: str) -> bool:
 
 def _nous_billing_url() -> Optional[str]:
     """Best-effort Nous portal billing URL (text-surface fallback; Nous prefers the in-app flow)."""
-    try:
-        from hermes_cli.nous_account import nous_portal_billing_url
-
-        return nous_portal_billing_url(None)
-    except Exception:
-        return "https://portal.nousresearch.com/billing"
+    # Portal URL helper pruned — use the static billing URL (fail-open).
+    return "https://portal.nousresearch.com/billing"
 
 
 def _resolve_provider_link(slug: str, base_url: str) -> tuple[str, Optional[str]]:

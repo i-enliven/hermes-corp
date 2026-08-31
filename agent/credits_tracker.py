@@ -825,25 +825,10 @@ def seed_credits_at_session_start(agent) -> bool:
             _hydrate_seed_state(agent, fixture)
             return True
 
-        # Real portal fetch is FIRE-AND-FORGET: a slow/unreachable portal must never
-        # delay session "ready". A daemon thread hydrates + emits when it resolves,
-        # re-checking idempotency first (a live inference header may land before it).
-        import threading
-
-        def _bg_seed() -> None:
-            try:
-                from hermes_cli.nous_account import get_nous_portal_account_info
-                info = get_nous_portal_account_info(force_fresh=True)
-                if getattr(agent, "_credits_state", None) is not None:
-                    return  # a live inference header beat us — don't clobber it
-                state = _credits_state_from_account(info)
-                if state is not None:
-                    _hydrate_seed_state(agent, state)
-            except Exception:
-                logger.debug("credits ▸ session-start seed (background) failed", exc_info=True)
-
-        threading.Thread(target=_bg_seed, name="credits-seed", daemon=True).start()
-        return True
+        # Portal client pruned — no background seed possible (fail-open:
+        # leave _credits_state as-is, never blocks session "ready").
+        logger.debug("credits ▸ session-start seed pruned — no account client")
+        return False
     except Exception:
         # Fail-open: any auth/portal hiccup leaves _credits_state as-is, never blocks.
         # Innermost log across all four call sites (TUI build / CLI build / first

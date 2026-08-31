@@ -24,13 +24,9 @@ from hermes_cli.config import (
     load_config, save_config, get_env_value, save_env_value,
 )
 from hermes_cli.colors import Colors, color
-from hermes_cli.nous_subscription import (
-    MANAGED_FEATURE_COVERAGE_CATEGORY,
-    NousSubscriptionFeatures,
-    apply_nous_managed_defaults,
-    get_nous_subscription_features,
-)
-from hermes_cli.nous_account import format_nous_portal_entitlement_message
+# Nous subscription/account clients pruned — the managed Tool Gateway
+# entitlement state is unavailable, so every dependent flow takes its
+# not-entitled fallback below.
 from tools.tool_backend_helpers import fal_key_is_configured
 from utils import base_url_hostname, is_truthy_value
 
@@ -2811,7 +2807,7 @@ def _toolset_has_keys(
     config: dict = None,
     *,
     force_fresh: bool = False,
-    features: Optional[NousSubscriptionFeatures] = None,
+    features= None,
 ) -> bool:
     """Check if a toolset's required API keys are configured."""
     if config is None:
@@ -2827,13 +2823,12 @@ def _toolset_has_keys(
             return False
 
     if ts_key in {"web", "image_gen", "video_gen", "tts", "stt", "browser"}:
-        if features is None:
-            features = get_nous_subscription_features(
-                config, force_fresh=force_fresh
-            )
-        feature = features.features.get(ts_key)
-        if feature and (feature.available or feature.managed_by_nous):
-            return True
+        # Subscription feature state is pruned — fall through to the
+        # provider/env checks below (no managed-by-Nous shortcut).
+        if features is not None:
+            feature = features.features.get(ts_key)
+            if feature and (feature.available or feature.managed_by_nous):
+                return True
 
     # Check TOOL_CATEGORIES first (provider-aware)
     cat = TOOL_CATEGORIES.get(ts_key)
@@ -3287,7 +3282,7 @@ def _visible_providers(
     config: dict,
     *,
     force_fresh: bool = False,
-    features: Optional[NousSubscriptionFeatures] = None,
+    features= None,
 ) -> list[dict]:
     """Return provider entries visible for the current auth/config state.
 
@@ -3297,20 +3292,10 @@ def _visible_providers(
     login + entitlement check (see ``_configure_provider``); the row only
     *activates* the gateway once paid access is confirmed.
     """
-    if features is None:
-        features = get_nous_subscription_features(config, force_fresh=force_fresh)
-    acct = features.account_info
-    # Pool-only users (entitled to managed tools via the free tool pool but with
-    # no paid access) get image gen but NOT video gen — the pool doesn't fund
-    # `fal-video`. Rather than advertise a managed video row that would be denied
-    # on select, hide it for them. Logged-out users still see it (advertising)
-    # and paid users are entitled to it.
-    pool_only = bool(
-        acct
-        and acct.logged_in
-        and acct.paid_service_access is not True
-        and acct.tool_gateway_entitled
-    )
+    # Subscription state is pruned — no pool-only filtering, managed rows
+    # stay visible (selecting one drives the not-entitled guidance path).
+    acct = getattr(features, "account_info", None) if features is not None else None
+    pool_only = False
     visible = []
     for provider in cat.get("providers", []):
         # Nous-managed Tool Gateway rows stay visible regardless of auth —
@@ -3320,7 +3305,7 @@ def _visible_providers(
         if (
             provider.get("requires_nous_auth")
             and not provider.get("managed_nous_feature")
-            and not features.nous_auth_present
+            and not (features is not None and features.nous_auth_present)
         ):
             continue
         # Hide the managed video-gen row from pool-only users — their free tool
@@ -3380,9 +3365,8 @@ def _hidden_nous_gateway_message(
     Previously this returned a "log in / upgrade" banner shown above a
     category when its Nous-managed rows were filtered out for unentitled
     users. Those rows are now always listed (see ``_visible_providers``), and
-    the login + entitlement guidance happens inline when the user selects one
-    (``ensure_nous_portal_access``). Kept as a no-op so call sites stay simple;
-    always returns an empty string.
+    selection guidance is handled inline. Kept as a no-op so call sites stay
+    simple; always returns an empty string.
     """
     return ""
 
@@ -3476,8 +3460,6 @@ def _agent_browser_installed() -> bool:
     no-op."""
     import sys
 
-    from hermes_cli.nous_subscription import _local_browser_runnable
-
     # The install hook runs in a spawned ``hermes tools post-setup`` process,
     # but this probe runs in the long-lived web-server/CLI process, whose
     # browser_tool module may have cached a stale "Chromium missing" result
@@ -3487,7 +3469,19 @@ def _agent_browser_installed() -> bool:
     if bt is not None:
         bt._cached_chromium_installed = None
 
-    return _local_browser_runnable()
+    # Subscription module pruned — replicate the local-browser readiness
+    # probe from tools.browser_tool (CLI + Chromium/Lightpanda) with a
+    # plain-presence fallback.
+    try:
+        from tools.browser_tool import (
+            _chromium_installed,
+            _using_lightpanda_engine,
+        )
+    except Exception:
+        return False
+    if _using_lightpanda_engine():
+        return True
+    return bool(_chromium_installed())
 
 
 def _camofox_installed() -> bool:
@@ -3520,9 +3514,15 @@ def _cloud_agent_browser_installed() -> bool:
 
     Cloud providers host their own Chromium, so their hook only installs the
     agent-browser npm package — presence of the CLI is the whole contract."""
-    from hermes_cli.nous_subscription import _has_agent_browser
-
-    return _has_agent_browser()
+    # Subscription module pruned — cloud rows need only the CLI on disk.
+    try:
+        from tools.browser_tool import _find_agent_browser
+    except Exception:
+        return False
+    try:
+        return bool(_find_agent_browser(validate=False))
+    except Exception:
+        return False
 
 
 def provider_readiness_status(
@@ -3548,8 +3548,9 @@ def provider_readiness_status(
     renders from (the old client-side heuristic showed Ready for every
     zero-env-var row, including logged-out Nous Subscription rows).
 
-    ``features`` (a ``NousSubscriptionFeatures``) can be passed to avoid
-    re-fetching portal state per row. ``is_active`` is the completed-setup
+    ``features`` can be passed to avoid re-fetching portal state per row
+    (the portal client is pruned — this is inert). ``is_active`` is the
+    completed-setup
     fallback signal for post_setup hooks with no registered installed-check
     (selecting a row runs its hook, so the active row has been set up).
     """
@@ -3561,26 +3562,10 @@ def provider_readiness_status(
 
     managed_feature = provider.get("managed_nous_feature")
     if provider.get("requires_nous_auth") or managed_feature:
-        if features is None:
-            features = get_nous_subscription_features(config)
-        if not features.nous_auth_present:
-            return "needs_auth"
-        if managed_feature:
-            # Same per-category entitlement gate the CLI applies at selection
-            # time (free tool-pool users get image gen but not video gen).
-            acct = features.account_info
-            category = MANAGED_FEATURE_COVERAGE_CATEGORY.get(managed_feature)
-            entitled = bool(
-                acct
-                and acct.logged_in
-                and (
-                    acct.tool_gateway_entitled_for(category)
-                    if category
-                    else acct.tool_gateway_entitled
-                )
-            )
-            if not entitled:
-                return "needs_auth"
+        # Subscription state is pruned — entitlement can never be verified,
+        # so managed/pre-auth rows always report needing auth (fail-open to
+        # the not-entitled path).
+        return "needs_auth"
         # Signed in and entitled — fall through: a managed row may still
         # carry a local install hook (e.g. the managed browser row needs
         # the agent-browser CLI on this machine).
@@ -3732,15 +3717,8 @@ def _configure_tool_category(
         # When the user is logged into Nous, surface a marker on providers
         # whose access is included in their subscription so it's visually
         # obvious which options cost extra vs. cost nothing on top of Nous.
-        try:
-            _nous_logged_in = bool(
-                get_nous_subscription_features(
-                    config,
-                    force_fresh=force_fresh,
-                ).nous_auth_present
-            )
-        except Exception:
-            _nous_logged_in = False
+        # Subscription state is pruned — never marked as logged in here.
+        _nous_logged_in = False
 
         provider_choices = []
         for p in providers:
@@ -3815,49 +3793,8 @@ def _is_provider_active(
 
     managed_feature = provider.get("managed_nous_feature")
     if managed_feature:
-        features = get_nous_subscription_features(config, force_fresh=force_fresh)
-        feature = features.features.get(managed_feature)
-        if feature is None:
-            return False
-        if managed_feature == "image_gen":
-            image_cfg = config.get("image_gen", {})
-            if isinstance(image_cfg, dict):
-                configured_provider = image_cfg.get("provider")
-                if configured_provider not in {None, "", "fal"}:
-                    return False
-                if image_cfg.get("use_gateway") is not None and not is_truthy_value(image_cfg.get("use_gateway"), default=False):
-                    return False
-            return feature.managed_by_nous
-        if managed_feature == "video_gen":
-            video_cfg = config.get("video_gen", {})
-            if isinstance(video_cfg, dict):
-                configured_provider = video_cfg.get("provider")
-                if configured_provider not in {None, "", "fal"}:
-                    return False
-                if video_cfg.get("use_gateway") is not None and not is_truthy_value(video_cfg.get("use_gateway"), default=False):
-                    return False
-            return feature.managed_by_nous
-        if provider.get("tts_provider"):
-            return (
-                feature.managed_by_nous
-                and cfg_get(config, "tts", "provider") == provider["tts_provider"]
-            )
-        if provider.get("stt_provider"):
-            return (
-                feature.managed_by_nous
-                and cfg_get(config, "stt", "provider") == provider["stt_provider"]
-            )
-        if "browser_provider" in provider:
-            # Browser Use mode is a driver on top of the provider (it attaches
-            # to the provider's CDP endpoint), so the provider row stays
-            # active alongside the Browser Use row.
-            current = cfg_get(config, "browser", "cloud_provider")
-            return feature.managed_by_nous and provider["browser_provider"] == current
-        if provider.get("web_backend"):
-            current = cfg_get(config, "web", "backend")
-            return feature.managed_by_nous and current == provider["web_backend"]
-        return feature.managed_by_nous
-
+        # Subscription state is pruned — managed rows are never active.
+        return False
     if provider.get("tts_provider"):
         return cfg_get(config, "tts", "provider") == provider["tts_provider"]
     if provider.get("stt_provider"):
@@ -4463,37 +4400,20 @@ def _configure_provider(
     # auth + entitlement only, no inference-provider switch and no bulk
     # "enable all tools" prompt (that lives in `hermes model`).
     if managed_feature:
-        from hermes_cli.nous_subscription import (
-            MANAGED_FEATURE_COVERAGE_CATEGORY,
-            ensure_nous_portal_access,
+        # Subscription client pruned — managed rows can never be activated
+        # (the inline Portal login/entitlement gate is gone).
+        _print_warning(
+            "  Not enabled — Nous Portal access is required for this backend."
         )
+        return
 
-        if not ensure_nous_portal_access(
-            capability=f"{provider.get('name', 'the Nous Tool Gateway')}",
-            coverage_category=MANAGED_FEATURE_COVERAGE_CATEGORY.get(managed_feature),
-        ):
-            _print_warning(
-                "  Not enabled — Nous Portal access is required for this backend."
-            )
-            return
-
-    # Pure pre-auth UX rows (requires_nous_auth without a managed gateway
-    # feature) keep the old gate. Managed rows are handled by the inline
-    # login above, so don't double-check them here.
+    # Pure pre-auth UX rows keep the old gate — always denied now (the
+    # subscription client that verified auth/entitlement is pruned).
     if provider.get("requires_nous_auth") and not managed_feature:
-        features = get_nous_subscription_features(config, force_fresh=force_fresh)
-        entitled = bool(
-            features.account_info and features.account_info.paid_service_access is True
+        _print_warning(
+            "  Nous Subscription is only available after logging into Nous Portal."
         )
-        if not features.nous_auth_present or not entitled:
-            message = format_nous_portal_entitlement_message(
-                features.account_info,
-                capability=f"{provider.get('name', 'Nous Subscription')}",
-            )
-            _print_warning(
-                f"  {message or 'Nous Subscription is only available after logging into Nous Portal.'}"
-            )
-            return
+        return
 
     # Set TTS provider in config if applicable
     if provider.get("tts_provider"):
@@ -4577,11 +4497,9 @@ def _configure_provider(
                     _has_managed_sibling = True
                     break
             if _has_managed_sibling:
-                _features = get_nous_subscription_features(
-                    config,
-                    force_fresh=force_fresh,
-                )
-                _show_portal_hint = not _features.nous_auth_present
+                # Subscription state is pruned — the hint can never be
+                # suppressed by an existing Nous login.
+                _show_portal_hint = True
         except Exception:
             _show_portal_hint = False
 
@@ -4976,36 +4894,20 @@ def _reconfigure_provider(
     # Same inline Nous Portal login + entitlement gate as _configure_provider:
     # managed Tool Gateway backends only activate with paid Portal access.
     if managed_feature:
-        from hermes_cli.nous_subscription import (
-            MANAGED_FEATURE_COVERAGE_CATEGORY,
-            ensure_nous_portal_access,
+        # Subscription client pruned — managed rows can never be activated
+        # (the inline Portal login/entitlement gate is gone).
+        _print_warning(
+            "  Not enabled — Nous Portal access is required for this backend."
         )
+        return
 
-        if not ensure_nous_portal_access(
-            capability=f"{provider.get('name', 'the Nous Tool Gateway')}",
-            coverage_category=MANAGED_FEATURE_COVERAGE_CATEGORY.get(managed_feature),
-        ):
-            _print_warning(
-                "  Not enabled — Nous Portal access is required for this backend."
-            )
-            return
-
-    # Pure pre-auth UX rows keep the old gate; managed rows already handled
-    # by the inline login above.
+    # Pure pre-auth UX rows keep the old gate — always denied now (the
+    # subscription client that verified auth/entitlement is pruned).
     if provider.get("requires_nous_auth") and not managed_feature:
-        features = get_nous_subscription_features(config, force_fresh=force_fresh)
-        entitled = bool(
-            features.account_info and features.account_info.paid_service_access is True
+        _print_warning(
+            "  Nous Subscription is only available after logging into Nous Portal."
         )
-        if not features.nous_auth_present or not entitled:
-            message = format_nous_portal_entitlement_message(
-                features.account_info,
-                capability=f"{provider.get('name', 'Nous Subscription')}",
-            )
-            _print_warning(
-                f"  {message or 'Nous Subscription is only available after logging into Nous Portal.'}"
-            )
-            return
+        return
 
     if provider.get("tts_provider"):
         tts_cfg = config.setdefault("tts", {})
@@ -5250,14 +5152,9 @@ def tools_command(args=None, first_install: bool = False, config: dict = None):
                     label = next((l for k, l, _ in _get_effective_configurable_toolsets() if k == ts), ts)
                     print(color(f"  - {label}", Colors.RED))
 
-            auto_configured = apply_nous_managed_defaults(
-                config,
-                enabled_toolsets=new_enabled,
-                force_fresh=True,
-            )
-            for ts_key in sorted(auto_configured):
-                label = next((l for k, l, _ in CONFIGURABLE_TOOLSETS if k == ts_key), ts_key)
-                print(color(f"  ✓ {label}: using your Nous subscription defaults", Colors.GREEN))
+            # Subscription client pruned — no managed defaults are applied
+            # automatically.
+            auto_configured = []
 
             # Walk through ALL selected tools that have provider options or
             # need API keys.  This ensures browser (Local vs Browserbase),
