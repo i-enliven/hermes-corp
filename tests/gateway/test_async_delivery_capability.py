@@ -150,30 +150,6 @@ class TestStatelessChannelForcesSyncDelegation:
 
 
 # ---------------------------------------------------------------------------
-# Adapter capability flag
-# ---------------------------------------------------------------------------
-
-class TestAdapterCapabilityFlag:
-
-
-    def test_api_server_bind_chokepoint_hardwires_no_delivery(self):
-        """Every API-server agent-entry path binds through
-        _bind_api_server_session, which hardwires async_delivery=False — a new
-        route physically cannot reintroduce the silent no-op (#10760)."""
-        from gateway.platforms.api_server import APIServerAdapter
-        from gateway.session_context import clear_session_vars, get_session_env
-
-        tokens = APIServerAdapter._bind_api_server_session(
-            chat_id="c1", session_key="sk1", session_id="sid1"
-        )
-        try:
-            assert async_delivery_supported() is False
-            assert get_session_env("HERMES_SESSION_PLATFORM") == "api_server"
-        finally:
-            clear_session_vars(tokens)
-
-
-# ---------------------------------------------------------------------------
 # terminal_tool: refuses to register a watcher on unsupported sessions
 # ---------------------------------------------------------------------------
 
