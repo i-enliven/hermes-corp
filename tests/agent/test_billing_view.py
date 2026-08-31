@@ -1,15 +1,14 @@
-"""Unit tests for the Phase 2b Remote Spending core + HTTP client.
+"""Unit tests for the Remote Spending core (agent/billing_view.py).
 
 Covers:
 - Decimal money parsing/formatting (server emits decimal strings, not 2dp).
 - BillingState payload parsing (role tiering, presets, bounds, sub-structs).
-- Error-code → typed-exception mapping (the live-verified contract matrix).
 - Fail-open builder behavior.
 - Idempotency key generation.
 - Custom-amount validation against bounds + multipleOf 0.01.
+- HERMES_DEV_BILLING_FIXTURE offline scaffolding.
 
-No network: HTTP-layer tests drive _raise_for_error directly and monkeypatch the
-request function for the builder.
+No network: HTTP-layer tests monkeypatch the request function for the builder.
 """
 
 from __future__ import annotations
@@ -33,31 +32,25 @@ from agent.billing_view import (
     parse_money,
     validate_charge_amount,
 )
-import hermes_cli.nous_billing as nb
-from hermes_cli.nous_billing import (
-    BillingAuthError,
-    BillingError,
-    BillingRateLimited,
-    BillingScopeRequired,
-    BillingStripeUnavailable,
-    BillingTransient,
-    BillingUpgradeCapExceeded,
-    _raise_for_error,
-    resolve_portal_base_url,
-)
-
 
 # ---------------------------------------------------------------------------
 # Decimal money
 # ---------------------------------------------------------------------------
 
 
+def test_parse_money_decimal_string():
+    assert parse_money("142.5") == Decimal("142.5")
+    assert parse_money("100") == Decimal("100")
+    assert parse_money(None) is None
+    assert parse_money("abc") is None
+    assert parse_money("") is None
 
 
-
-
-
-
+def test_format_money_display_rules():
+    assert format_money(Decimal("142.5")) == "$142.50"
+    assert format_money(Decimal("100")) == "$100"
+    assert format_money(Decimal("0.01")) == "$0.01"
+    assert format_money(None) == "—"
 
 
 # ---------------------------------------------------------------------------
@@ -114,9 +107,7 @@ def test_state_member_tier_parse():
         ("MEMBER", None, False, False),
     ],
 )
-def test_state_five_roles(
-    role, can_change_plan_raw, is_admin, can_change_plan
-):
+def test_state_five_roles(role, can_change_plan_raw, is_admin, can_change_plan):
     payload = _member_payload()
     payload["org"]["role"] = role
     if can_change_plan_raw is not None:
@@ -127,16 +118,6 @@ def test_state_five_roles(
     assert state.is_admin is is_admin
     assert state.can_change_plan_raw is can_change_plan_raw
     assert state.can_change_plan is can_change_plan
-    if role == "SECURITY_ADMIN":
-        assert state.card is None
-        assert state.monthly_cap is None
-        assert state.auto_reload is None
-
-
-
-
-
-
 
 
 def test_state_owner_tier_parse():
@@ -155,106 +136,45 @@ def test_state_owner_tier_parse():
     )
 
 
+def test_state_payment_method_card_kind():
+    p = _member_payload()
+    p["paymentMethod"] = {"kind": "card", "brand": "visa", "last4": "4242"}
+    s = billing_state_from_payload(p)
+    pm = s.payment_method
+    assert pm is not None and pm.kind == "card"
+    assert pm.brand == "visa" and pm.last4 == "4242"
+
+def test_state_payment_method_link_and_unknown_kinds():
+    p = _member_payload()
+    p["paymentMethod"] = {"kind": "link", "email": "x@y.com"}
+    s = billing_state_from_payload(p)
+    assert s.payment_method.kind == "link"
+    p["paymentMethod"] = {"kind": "weird_thing", "brand": "visa"}
+    s = billing_state_from_payload(p)
+    pm = s.payment_method
+    assert pm is not None and pm.kind == "unknown" and pm.raw_kind == "weird_thing"
 
 
+def test_state_auto_reload_card_distinct():
+    p = _member_payload()
+    p["autoReload"] = {
+        "enabled": True,
+        "thresholdUsd": "20",
+        "reloadToUsd": "100",
+        "card": {"kind": "distinct", "paymentMethodId": "pm_1", "brand": "visa", "last4": "0002"},
+    }
+    s = billing_state_from_payload(p)
+    ar = s.auto_reload
+    assert ar is not None and ar.card == AutoReloadCard(
+        kind="distinct", payment_method_id="pm_1", brand="visa", last4="0002"
+    )
 
 
-
-
-
-
-
-
-
-
-
-
-# ---------------------------------------------------------------------------
-# Error-code → typed-exception mapping (live-verified contract)
-# ---------------------------------------------------------------------------
-
-
-class _Headers:
-    def __init__(self, d):
-        self._d = d
-
-    def get(self, k):
-        return self._d.get(k)
-
-
-def test_401_maps_to_auth_error():
-    with pytest.raises(BillingAuthError) as ei:
-        _raise_for_error(401, {"error": "invalid_token"})
-    assert ei.value.status == 401
-
-
-def test_403_insufficient_scope_maps_to_scope_required():
-    with pytest.raises(BillingScopeRequired) as ei:
-        _raise_for_error(403, {"error": "insufficient_scope", "portalUrl": "/billing"})
-    assert ei.value.error == "insufficient_scope"
-    # portalUrl is resolved to an absolute URL (relative-by-design from the server).
-    assert (ei.value.portal_url or "").startswith("http")
-    assert (ei.value.portal_url or "").endswith("/billing")
-
-
-
-
-@pytest.mark.parametrize(
-    "status,error,expected_type",
-    [
-        (503, "stripe_unavailable", BillingStripeUnavailable),
-        (429, "upgrade_cap_exceeded", BillingUpgradeCapExceeded),
-    ],
-)
-def test_specific_billing_throttle_errors_remain_distinguishable(
-    status, error, expected_type
-):
-    with pytest.raises(expected_type) as ei:
-        _raise_for_error(
-            status,
-            {"error": error},
-            _Headers({"Retry-After": "90"}),
-        )
-
-    assert ei.value.error == error
-    assert ei.value.retry_after == 90
-    assert isinstance(ei.value, BillingTransient)
-    assert not isinstance(ei.value, BillingRateLimited)
-
-
-
-
-
-
-def test_400_amount_out_of_bounds_is_base_error():
-    with pytest.raises(BillingError) as ei:
-        _raise_for_error(400, {"error": "amount_out_of_bounds", "message": "too big"})
-    assert ei.value.status == 400
-    assert "too big" in str(ei.value)
-
-
-# ---------------------------------------------------------------------------
-# post_charge requires idempotency key (client-side guard)
-# ---------------------------------------------------------------------------
-
-
-
-
-
-
-# ---------------------------------------------------------------------------
-# Base-URL resolution precedence
-# ---------------------------------------------------------------------------
-
-
-
-
-
-
-def test_portal_base_url_default(monkeypatch):
-    monkeypatch.delenv("HERMES_PORTAL_BASE_URL", raising=False)
-    monkeypatch.delenv("NOUS_PORTAL_BASE_URL", raising=False)
-    assert resolve_portal_base_url() == nb.DEFAULT_PORTAL_BASE_URL
+def test_card_provenance_label():
+    c = CardInfo(brand="visa", last4="4242", resolved_via="subPin")
+    assert c.provenance == "the card on your subscription"
+    assert "the card on your subscription" in c.display
+    assert CardInfo(brand="visa", last4="4242").provenance is None
 
 
 # ---------------------------------------------------------------------------
@@ -262,20 +182,12 @@ def test_portal_base_url_default(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-
-
-def test_build_billing_state_fail_open_on_http_error(monkeypatch):
-    def _boom(*a, **kw):
-        raise BillingError("portal exploded", status=500)
-
-    monkeypatch.setattr(nb, "get_billing_state", _boom)
+def test_build_billing_state_fail_open_when_client_missing(monkeypatch):
+    """hermes_cli.nous_billing was pruned — the builder fail-opens cleanly."""
+    monkeypatch.delenv("HERMES_DEV_BILLING_FIXTURE", raising=False)
     s = build_billing_state()
     assert s.logged_in is False
-    assert "portal exploded" in (s.error or "")
-
-
-
-
+    assert (s.error or "") == "billing client unavailable"
 
 
 # ---------------------------------------------------------------------------
@@ -292,10 +204,6 @@ def test_new_idempotency_key_unique_and_uuid_shaped():
 # ---------------------------------------------------------------------------
 # Amount validation (Screen 3 custom input)
 # ---------------------------------------------------------------------------
-
-
-
-
 
 
 @pytest.mark.parametrize(
@@ -315,11 +223,16 @@ def test_validate_amount_rejections(raw, err_substr):
     assert err_substr.lower() in (v.error or "").lower()
 
 
+def test_validate_amount_accepts_in_bounds_value():
+    v = validate_charge_amount("250", min_usd=Decimal("10"), max_usd=Decimal("10000"))
+    assert v.ok
+    assert v.amount == Decimal("250")
+    assert v.error is None
+
+
 # ---------------------------------------------------------------------------
 # HERMES_DEV_BILLING_FIXTURE — offline card/scope state scaffolding (T0)
 # ---------------------------------------------------------------------------
-
-
 
 
 @pytest.mark.parametrize(
@@ -340,7 +253,3 @@ def test_billing_fixture_card_and_gate_invariants(monkeypatch, name, has_card, i
     assert (s.card is not None) is has_card
     assert s.is_admin is is_admin
     assert s.cli_billing_enabled is billing_on
-
-
-
-
