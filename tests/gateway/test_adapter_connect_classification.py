@@ -1,20 +1,22 @@
 """Connect-failure classification + reconnect-queue escalation (OOF-156).
 
-Four platforms (telegram, discord, photon, email) used to funnel every
-startup failure into an indefinitely-retried state — including permanent
-failures like revoked tokens, missing privileged intents, and sidecar deps
-that can never install on an immutable image. Fleet triage found agents that
-had been silently "retrying" for weeks (OOF-151/152/153).
+Platform adapters used to funnel every startup failure into an
+indefinitely-retried state — including permanent failures like revoked
+tokens that can never self-heal. Fleet triage found agents that had been
+silently "retrying" for weeks (OOF-151/152/153).
 
 Two-part fix, both covered here:
 
-1. Per-adapter classification: auth/permission/deterministic failures are
-   classified by exception TYPE (never message text) as ``retryable=False``
-   so they exit via the existing non-retryable fatal path.
-2. Gateway escalation: platforms continuously in the reconnect queue past a
-   threshold get ``needs_attention`` flagged in runtime status. Retries never
-   stop — the deliberate removal of auto-pause stands (a transient outage
-   must self-heal without operator action).
+1. Per-adapter classification: auth/deterministic failures are classified
+   by exception TYPE (never message text) as ``retryable=False`` so they
+   exit via the existing non-retryable fatal path.
+2. Gateway escalation: platforms continuously in the reconnect queue past
+   a threshold get ``needs_attention`` flagged in runtime status. Retries
+   never stop — the deliberate removal of auto-pause stands (a transient
+   outage must self-heal without operator action).
+
+Pruned platform adapters (telegram/discord/photon) are no longer covered
+here; their classification logic went away with the adapters themselves.
 """
 
 import asyncio
@@ -28,172 +30,6 @@ from gateway.run import (
     GatewayRunner,
     _reconnect_needs_attention,
 )
-
-
-# ── Telegram: type-based auth classification ───────────────────────────
-
-
-class InvalidToken(Exception):  # noqa: N818 — name-matched stand-in
-    pass
-
-
-class Forbidden(Exception):  # noqa: N818
-    pass
-
-
-class NetworkError(Exception):  # noqa: N818
-    pass
-
-
-class TimedOut(Exception):  # noqa: N818
-    pass
-
-
-def _telegram_classifier():
-    from plugins.platforms.telegram.adapter import TelegramAdapter
-
-    return TelegramAdapter._looks_like_auth_error
-
-
-class TestTelegramAuthClassification:
-    """InvalidToken/Forbidden are terminal; transient transports are not."""
-
-    def test_invalid_token_is_auth_error(self):
-        # Classifier matches on class name so tests do not need real
-        # telegram.error types — mirrors _looks_like_network_error's design.
-        assert _telegram_classifier()(InvalidToken("401 Unauthorized")) is True
-
-    def test_forbidden_is_auth_error(self):
-        assert _telegram_classifier()(Forbidden("bot was deleted")) is True
-
-    def test_network_error_is_not_auth_error(self):
-        assert _telegram_classifier()(NetworkError("dns failure")) is False
-
-    def test_timeout_is_not_auth_error(self):
-        assert _telegram_classifier()(TimedOut("read timeout")) is False
-
-    def test_generic_exception_is_not_auth_error(self):
-        # Unknown types must stay retryable — a false terminal recreates the
-        # "silently dead bot" problem the auto-pause removal fixed.
-        assert _telegram_classifier()(RuntimeError("weird")) is False
-
-    def test_auth_message_text_does_not_classify(self):
-        # Guard against text matching creeping back in: an exception whose
-        # MESSAGE mentions auth but whose type is generic must stay retryable.
-        assert _telegram_classifier()(RuntimeError("InvalidToken Forbidden")) is False
-
-
-# ── Discord: connect exception classification ──────────────────────────
-
-
-class LoginFailure(Exception):
-    """Name-matched stand-in for discord.LoginFailure."""
-
-
-class PrivilegedIntentsRequired(Exception):
-    """Name-matched stand-in for discord.PrivilegedIntentsRequired."""
-
-
-def _discord_classifier():
-    from plugins.platforms.discord.adapter import DiscordAdapter
-
-    # Instance-bound (the intents branch reads the adapter's allowlists to
-    # tailor its guidance); a bare instance with empty allowlists suffices.
-    adapter = object.__new__(DiscordAdapter)
-    adapter._allowed_user_ids = set()
-    adapter._allowed_role_ids = set()
-    return adapter._classify_connect_exception
-
-
-class TestDiscordConnectClassification:
-    def test_login_failure_is_terminal(self):
-        code, message, retryable = _discord_classifier()(LoginFailure("Improper token"))
-        assert code == "discord_auth_error"
-        assert retryable is False
-        assert "Developer Portal" in message
-
-    def test_privileged_intents_is_terminal(self):
-        code, message, retryable = _discord_classifier()(
-            PrivilegedIntentsRequired("shard 0 requested privileged intents")
-        )
-        assert code == "discord_intents_required"
-        assert retryable is False
-        assert "Message Content Intent" in message
-
-    def test_unknown_exception_is_retryable_with_explicit_code(self):
-        # The old behavior set NO fatal code at all, which the gateway read
-        # as "probably transient". Every failure must now carry a code.
-        code, message, retryable = _discord_classifier()(OSError("connection reset"))
-        assert code == "discord_connect_error"
-        assert retryable is True
-
-    def test_auth_message_text_does_not_classify(self):
-        code, _message, retryable = _discord_classifier()(
-            RuntimeError("LoginFailure: PrivilegedIntentsRequired")
-        )
-        assert code == "discord_connect_error"
-        assert retryable is True
-
-
-# ── Photon: typed sidecar startup errors ───────────────────────────────
-
-
-class TestPhotonSidecarStartupClassification:
-    def _make_adapter(self, monkeypatch):
-        monkeypatch.setenv("PHOTON_PROJECT_ID", "pid")
-        monkeypatch.setenv("PHOTON_PROJECT_SECRET", "psecret")
-        from plugins.platforms.photon.adapter import PhotonAdapter
-
-        return PhotonAdapter(PlatformConfig(enabled=True, token="", extra={}))
-
-    @pytest.mark.asyncio
-    async def test_typed_startup_error_sets_nonretryable_fatal(self, monkeypatch):
-        from plugins.platforms.photon import adapter as photon_adapter
-
-        adapter = self._make_adapter(monkeypatch)
-
-        async def _boom():
-            raise photon_adapter.PhotonSidecarStartupError(
-                "deps could not be installed",
-                code="SIDECAR_DEPS_MISSING",
-                retryable=False,
-            )
-
-        monkeypatch.setattr(adapter, "_start_sidecar", _boom)
-        ok = await adapter.connect()
-
-        assert ok is False
-        assert adapter.fatal_error_code == "SIDECAR_DEPS_MISSING"
-        assert adapter.fatal_error_retryable is False
-
-    @pytest.mark.asyncio
-    async def test_untyped_startup_error_stays_retryable(self, monkeypatch):
-        # Ambiguous failures (crash before ready, health timeout) must keep
-        # retrying; the gateway's needs_attention escalation is the backstop.
-        adapter = self._make_adapter(monkeypatch)
-
-        async def _boom():
-            raise RuntimeError("sidecar exited with code 1 before becoming ready")
-
-        monkeypatch.setattr(adapter, "_start_sidecar", _boom)
-        ok = await adapter.connect()
-
-        assert ok is False
-        assert adapter.fatal_error_code == "SIDECAR_FAILED"
-        assert adapter.fatal_error_retryable is True
-
-    def test_deps_install_failure_raises_typed_nonretryable(self, monkeypatch):
-        from plugins.platforms.photon import adapter as photon_adapter
-
-        adapter = self._make_adapter(monkeypatch)
-        monkeypatch.setattr(photon_adapter, "sidecar_deps_installed", lambda: False)
-        monkeypatch.setattr(photon_adapter, "_reinstall_sidecar_deps", lambda: None)
-
-        with pytest.raises(photon_adapter.PhotonSidecarStartupError) as exc_info:
-            asyncio.get_event_loop().run_until_complete(adapter._start_sidecar())
-
-        assert exc_info.value.code == "SIDECAR_DEPS_MISSING"
-        assert exc_info.value.retryable is False
 
 
 # ── Email: explicit fatal codes on IMAP/SMTP failure ───────────────────
