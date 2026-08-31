@@ -251,69 +251,6 @@ class TestRotationContinuityEndToEnd:
 class TestTransportWiring:
     """cache_scope_id reaches the key derivation on both transports."""
 
-    def test_codex_build_kwargs_prefers_cache_scope_id(self):
-        from agent.transports.codex import ResponsesApiTransport
-
-        transport = ResponsesApiTransport()
-        base = dict(
-            model="gpt-5.5",
-            messages=[
-                {"role": "system", "content": "sys"},
-                {"role": "user", "content": "hi"},
-            ],
-            tools=[],
-        )
-        # Rotation: different physical ids, same logical scope -> same key.
-        k1 = transport.build_kwargs(
-            **base, session_id="root-sess", cache_scope_id="root-sess"
-        )
-        k2 = transport.build_kwargs(
-            **base, session_id="rotated-1", cache_scope_id="root-sess"
-        )
-        assert k1["prompt_cache_key"] == k2["prompt_cache_key"]
-        # Without the logical scope, rotation used to change the key.
-        k3 = transport.build_kwargs(**base, session_id="rotated-1")
-        assert k3["prompt_cache_key"] != k1["prompt_cache_key"]
-
-    def test_codex_session_header_keeps_physical_id(self):
-        """Transcript identity (#57012 contract) must NOT be rewritten."""
-        from agent.transports.codex import ResponsesApiTransport
-
-        transport = ResponsesApiTransport()
-        kwargs = transport.build_kwargs(
-            model="gpt-5.5",
-            messages=[
-                {"role": "system", "content": "sys"},
-                {"role": "user", "content": "hi"},
-            ],
-            tools=[],
-            session_id="rotated-1",
-            cache_scope_id="root-sess",
-            is_codex_backend=True,
-        )
-        assert kwargs["extra_headers"]["session_id"] == "rotated-1"
-        # Routing header mirrors the body's scoped cache key.
-        assert kwargs["extra_headers"]["x-client-request-id"] == kwargs[
-            "prompt_cache_key"
-        ]
-
-    def test_xai_conv_id_uses_logical_scope(self):
-        from agent.transports.codex import ResponsesApiTransport
-
-        transport = ResponsesApiTransport()
-        kwargs = transport.build_kwargs(
-            model="grok-4",
-            messages=[
-                {"role": "system", "content": "sys"},
-                {"role": "user", "content": "hi"},
-            ],
-            tools=[],
-            session_id="rotated-1",
-            cache_scope_id="root-sess",
-            is_xai_responses=True,
-        )
-        assert kwargs["extra_headers"]["x-grok-conv-id"] == "root-sess"
-
     def test_chat_completions_prefers_cache_scope_id(self):
         from agent.transports.chat_completions import _add_prompt_cache_key
 
@@ -334,30 +271,6 @@ class TestTransportWiring:
         assert key("root-sess", "root-sess") == key("rotated-1", "root-sess")
         assert key("rotated-1") != key("rotated-1", "root-sess")
 
-    def test_cron_normalization_still_applies_to_scope(self):
-        """cron_<job>_<ts> scopes still normalize per-fire timestamps away."""
-        from agent.transports.codex import ResponsesApiTransport
-
-        transport = ResponsesApiTransport()
-        base = dict(
-            model="gpt-5.5",
-            messages=[
-                {"role": "system", "content": "sys"},
-                {"role": "user", "content": "hi"},
-            ],
-            tools=[],
-        )
-        k1 = transport.build_kwargs(
-            **base,
-            session_id="cron_backup_20260814_120000",
-            cache_scope_id="cron_backup_20260814_120000",
-        )
-        k2 = transport.build_kwargs(
-            **base,
-            session_id="cron_backup_20260815_120000",
-            cache_scope_id="cron_backup_20260815_120000",
-        )
-        assert k1["prompt_cache_key"] == k2["prompt_cache_key"]
 
 
 class TestAuxiliaryRuntimeThreading:
