@@ -1,10 +1,13 @@
-"""Tests for the /credits command — shared view core + gateway handler.
+"""Tests for the /topup command — shared view core + gateway handler.
 
-`/credits` is the focused money surface (balance in, top-up out). These tests
-exercise the surface-agnostic `build_credits_view()` core and assert the gateway
-handler renders the block + tappable top-up URL + no-wait copy. The CLI panel is
-a thin wrapper over the same view (interactive prompt_toolkit modal — covered by
-the view-core tests plus manual verification).
+``/topup`` is the focused money surface (balance in, top-up out) — the rehaul
+folded the old ``/credits`` + ``/billing`` surfaces into it. These tests
+exercise the surface-agnostic ``build_credits_view()`` fail-open contract via
+the gateway handler and lock the command registry state (``/topup`` is the
+only billing surface, alias-free, on every platform). The live portal path is
+the pruned ``hermes_cli.nous_account`` client, so logged-in rendering is
+fail-open offline (``logged_in=False``) and is covered by the gateway
+not-logged-in test plus manual verification.
 """
 
 from __future__ import annotations
@@ -14,72 +17,7 @@ import asyncio
 import pytest
 
 import agent.account_usage as account_usage
-from agent.account_usage import CreditsView, build_credits_view
-from hermes_cli.nous_account import NousPortalAccountInfo, NousPaidServiceAccessInfo
-
-
-def _account(**kwargs) -> NousPortalAccountInfo:
-    kwargs.setdefault("logged_in", True)
-    kwargs.setdefault("source", "account_api")
-    kwargs.setdefault("fresh", True)
-    kwargs.setdefault("portal_base_url", "https://portal.example.test")
-    return NousPortalAccountInfo(**kwargs)
-
-
-@pytest.fixture
-def _logged_in_account(monkeypatch):
-    """Stub the auth token + account fetch so build_credits_view runs offline."""
-    monkeypatch.setattr(
-        "hermes_cli.auth.get_provider_auth_state",
-        lambda provider: {"access_token": "tok", "portal_base_url": "https://portal.example.test"},
-    )
-
-    def _install(account):
-        monkeypatch.setattr(
-            "hermes_cli.nous_account.get_nous_portal_account_info",
-            lambda *a, **kw: account,
-        )
-
-    return _install
-
-
-# ── build_credits_view core ─────────────────────────────────────────────────
-
-
-
-
-def test_view_built_with_org_pinned_url_and_identity(_logged_in_account):
-    _logged_in_account(
-        _account(
-            org_slug="acme",
-            org_name="Acme Inc",
-            email="alice@example.test",
-            paid_service_access=True,
-            paid_service_access_info=NousPaidServiceAccessInfo(
-                purchased_credits_remaining=30.0,
-                total_usable_credits=30.0,
-            ),
-            subscription=None,
-        )
-    )
-
-    view = build_credits_view()
-
-    assert view.logged_in is True
-    assert view.topup_url == "https://portal.example.test/orgs/acme/billing?topup=open"
-    assert view.identity_line == "Topping up as alice@example.test / org Acme Inc"
-    assert view.depleted is False
-    # Balance lines carry the magnitudes but NOT the /usage affordance lines.
-    blob = "\n".join(view.balance_lines)
-    assert "Top-up credits: $30.00" in blob
-    assert "Top up:" not in blob  # the trailing /usage affordance is stripped
-    assert "(or run" not in blob
-
-
-
-
-
-
+from agent.account_usage import CreditsView
 
 
 # ── gateway _handle_topup_command (the messaging billing surface) ────────────
@@ -100,8 +38,6 @@ def _make_gateway_stub():
     return _Stub()
 
 
-
-
 def test_gateway_topup_not_logged_in(monkeypatch):
     monkeypatch.setattr(
         account_usage, "build_credits_view", lambda *a, **kw: CreditsView(logged_in=False)
@@ -109,8 +45,6 @@ def test_gateway_topup_not_logged_in(monkeypatch):
     stub = _make_gateway_stub()
     out = asyncio.run(stub._handle_topup_command(_FakeEvent()))
     assert "Not logged into Nous Portal" in out
-
-
 
 
 # ── command registry ────────────────────────────────────────────────────────
