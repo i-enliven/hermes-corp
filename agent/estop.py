@@ -4,8 +4,6 @@
 ``hermes resume`` removes it. While the sentinel exists:
 
 * the cron scheduler skips dispatching due jobs (``cron/scheduler.py:tick``),
-* the embedded kanban dispatcher skips spawning workers
-  (``gateway/kanban_watchers.py``),
 * new gateway turns get a brief "Hermes is paused" reply instead of an
   agent run (``gateway/run.py:_handle_message``).
 

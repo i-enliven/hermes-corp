@@ -161,17 +161,7 @@ def test_cron_tick_resumes_after_disengage(hermes_home, monkeypatch):
 
 
 # ── kanban dispatcher integration ───────────────────────────────────────────
-
-
-def test_kanban_dispatch_blocked_when_engaged(hermes_home):
-    from gateway.kanban_watchers import _kanban_dispatch_allowed
-
-    assert _kanban_dispatch_allowed() is True
-    estop.engage(reason="test")
-    assert _kanban_dispatch_allowed() is False
-    estop.disengage()
-    assert _kanban_dispatch_allowed() is True
-
+# (removed: kanban dispatcher gating lives in pruned gateway/kanban_watchers)
 
 # ── gateway turn-start integration ──────────────────────────────────────────
 
