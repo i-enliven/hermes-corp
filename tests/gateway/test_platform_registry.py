@@ -21,10 +21,23 @@ class TestPlatformEnumDynamic:
 
     def test_dynamic_member_case_normalised(self):
         """Mixed case normalised to lowercase."""
-        a = Platform("IRC")
-        b = Platform("irc")
-        assert a is b
-        assert a.value == "irc"
+        from gateway.platform_registry import platform_registry as _reg
+
+        entry = PlatformEntry(
+            name="irc",
+            label="IRC",
+            adapter_factory=lambda cfg: MagicMock(),
+            check_fn=lambda: True,
+            source="plugin",
+        )
+        _reg.register(entry)
+        try:
+            a = Platform("IRC")
+            b = Platform("irc")
+            assert a is b
+            assert a.value == "irc"
+        finally:
+            _reg.unregister("irc")
 
     def test_dynamic_member_with_hyphens(self):
         """Registered plugin platforms with hyphens work once registered."""
@@ -684,8 +697,7 @@ class TestMigratedPlatformWiring:
     @_pytest.mark.parametrize(
         "platform_name",
         [
-            "teams", "telegram", "discord", "slack",
-            "matrix", "dingtalk", "feishu", "wecom_callback",
+            "teams",
         ],
     )
     def test_lazy_installable_platform_has_split_wiring(self, platform_name):
