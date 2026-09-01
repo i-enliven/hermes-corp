@@ -112,7 +112,14 @@ def _split_allowlist(raw: str) -> list:
 def _normalize_user_id(platform: str, user_id: str) -> str:
     """Normalize platform-specific user IDs before persisting / comparing them."""
     raw_user_id = str(user_id or "").strip()
-    return raw_user_id
+    if not raw_user_id:
+        return raw_user_id
+    try:
+        from gateway.whatsapp_identity import normalize_whatsapp_identifier
+
+        return normalize_whatsapp_identifier(raw_user_id)
+    except Exception:
+        return raw_user_id
 
 
 def _user_id_aliases(platform: str, user_id: str) -> set[str]:
@@ -121,7 +128,17 @@ def _user_id_aliases(platform: str, user_id: str) -> set[str]:
     if not raw_user_id:
         return set()
 
-    aliases = {raw_user_id, _normalize_user_id(platform, raw_user_id)}
+    try:
+        from gateway.whatsapp_identity import expand_whatsapp_aliases
+
+        whatsapp_aliases = expand_whatsapp_aliases(raw_user_id)
+    except Exception:
+        whatsapp_aliases = {raw_user_id}
+
+    aliases = (
+        whatsapp_aliases
+        | {raw_user_id, _normalize_user_id(platform, raw_user_id)}
+    )
     aliases.discard("")
     return aliases
 
@@ -151,7 +168,11 @@ def _read_allowlist_env(env_var: str) -> str:
         from agent.secret_scope import UnscopedSecretError, get_secret
 
         try:
-            return (get_secret(env_var) or "").strip()
+            value = (get_secret(env_var) or "").strip()
+            if value:
+                return value
+            # Scoped empty reads fall through to the process env so pairing
+            # mutations on a single-profile gateway still see seeded envs.
         except UnscopedSecretError:
             pass
     except Exception:
