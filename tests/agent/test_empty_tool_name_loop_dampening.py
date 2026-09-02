@@ -154,12 +154,17 @@ def agent_env():
         yield agent, _MockHandler
     finally:
         srv.shutdown()
+        try:
+            import hermes_logging
+            hermes_logging.flush_log_queue()
+            hermes_logging._reset_queued_handlers()
+        except Exception:
+            pass
         shutil.rmtree(test_home, ignore_errors=True)
         if prev_home is None:
             os.environ.pop("HERMES_HOME", None)
         else:
             os.environ["HERMES_HOME"] = prev_home
-
 
 def _tool_results(handler) -> list[str]:
     out = []

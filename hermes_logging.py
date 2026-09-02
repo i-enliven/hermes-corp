@@ -487,7 +487,7 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
             except Exception:
                 # Couldn't reopen — leave stream=None; next emit will
                 # bail rather than write to a stale inode.
-                pass
+                self.stream = None  # type: ignore[assignment]
             return
         except OSError:
             return  # transient — try again on the next emit
@@ -509,18 +509,24 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
                 self.stream = self._open()
                 self._stat_dev, self._stat_ino = st.st_dev, st.st_ino
             except Exception:
-                pass
+                self.stream = None  # type: ignore[assignment]
 
     def emit(self, record: logging.LogRecord) -> None:
         # Cheap-ish stat-per-record check; the kernel caches inode metadata
         # so the syscall is sub-microsecond on a hot file.
-        if self.stream is not None or os.path.exists(self.baseFilename):
+        if self.stream is not None or os.path.exists(os.path.dirname(self.baseFilename) or "."):
             self._reopen_if_externally_rotated()
+        if self.stream is None:
+            # Log file or parent directory was unlinked or could not be opened.
+            # Bail out cleanly to prevent stdlib shouldRollover() from crashing
+            # on self._open() and spamming stderr with tracebacks.
+            return
         super().emit(record)
 
     def handleError(self, record: logging.LogRecord) -> None:
         """Suppress the known Windows ``concurrent-log-handler`` lock timeout
-        instead of printing a traceback.
+        and unlinked log file/directory teardown errors instead of printing a
+        traceback.
 
         CLH's own ``emit()`` wraps its body in ``try/except Exception:
         self.handleError(record)``, so the ``"Cannot acquire lock after N
@@ -532,8 +538,9 @@ class _ManagedRotatingFileHandler(RotatingFileHandler):
         exc = sys.exc_info()[1]
         if _is_windows_concurrent_log_lock_timeout(exc):
             return
+        if isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+            return
         super().handleError(record)
-
     def _open(self):
         stream = super()._open()
         self._chmod_if_managed()

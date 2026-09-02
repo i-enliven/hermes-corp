@@ -594,10 +594,68 @@ class TestExternalRotationRecovery:
         assert "AFTER rotation" in gw_path.read_text()
         assert "AFTER rotation" not in rotated.read_text()
 
+    def test_emit_when_directory_deleted_does_not_raise_or_log_error(
+        self, tmp_path, monkeypatch,
+    ):
+        """Unlinking the log directory mid-run must silently drop records
+        without raising exceptions or writing '--- Logging error ---' to stderr.
+        """
+        import shutil
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        log_path = log_dir / "agent.log"
+        handler = self._make_handler(log_path)
+
+        captured_stderr = io.StringIO()
+        monkeypatch.setattr(sys, "stderr", captured_stderr)
+
+        try:
+            self._emit(handler, "before delete")
+            assert log_path.read_text() == "before delete\n"
+
+            # Delete the parent directory out from under the handler
+            shutil.rmtree(log_dir)
+            assert not log_dir.exists()
+
+            # Emitting on a deleted path should drop gracefully and never crash
+            self._emit(handler, "after delete 1")
+            self._emit(handler, "after delete 2")
+
+            assert "--- Logging error ---" not in captured_stderr.getvalue()
+            assert "Traceback" not in captured_stderr.getvalue()
+        finally:
+            handler.close()
+
+    def test_reopen_recovers_if_directory_recreated(self, tmp_path):
+        """If a deleted log directory is later recreated, subsequent emits
+        reopen the stream and resume logging cleanly.
+        """
+        import shutil
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        log_path = log_dir / "agent.log"
+        handler = self._make_handler(log_path)
+
+        try:
+            self._emit(handler, "initial write")
+            assert log_path.read_text() == "initial write\n"
+
+            # Directory deleted
+            shutil.rmtree(log_dir)
+            self._emit(handler, "dropped during outage")
+
+            # Directory recreated and file recreated
+            log_dir.mkdir()
+            self._emit(handler, "recovered write")
+
+            assert log_path.exists()
+            assert "recovered write" in log_path.read_text()
+        finally:
+            handler.close()
+
 
 class TestSafeStderr:
     """Tests for _safe_stderr() — Unicode tolerance on Windows console."""
-
 
     def test_wraps_non_utf8_stderr(self, monkeypatch):
         """On non-UTF-8 systems (e.g. Windows cp949), wraps stderr with UTF-8."""
