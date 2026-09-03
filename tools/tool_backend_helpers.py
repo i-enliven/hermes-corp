@@ -44,8 +44,7 @@ def nous_tool_gateway_unavailable_message(
     # Portal account client pruned — no account-aware message available; take
     # the plain fallback below unconditionally.
     return (
-        f"{capability} is unavailable. Run `hermes model` to refresh your "
-        "Nous Portal login and billing status."
+        f"{capability} is unavailable. Please configure the required API key in your environment."
     )
 
 

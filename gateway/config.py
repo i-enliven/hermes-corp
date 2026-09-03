@@ -430,12 +430,6 @@ PORT_BINDING_PLATFORM_VALUES = frozenset({
     "webhook",
     "api_server",
     "msgraph_webhook",
-    "feishu",
-    "wecom_callback",
-    "bluebubbles",
-    "sms",
-    "whatsapp_cloud",
-    "line",
 })
 
 # Platforms whose port-binding status depends on connection mode. Feishu in

@@ -34,7 +34,11 @@ def cmd_proxy_start(args: Any) -> int:
         _print_aiohttp_missing()
         return 1
 
-    provider = getattr(args, "provider", None) or "nous"
+    if not ADAPTERS:
+        print("No proxy upstream providers are available in this build.", file=sys.stderr)
+        return 1
+
+    provider = getattr(args, "provider", None) or next(iter(ADAPTERS))
     try:
         adapter = get_adapter(provider)
     except ValueError as exc:

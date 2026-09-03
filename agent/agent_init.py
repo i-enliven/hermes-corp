@@ -200,6 +200,11 @@ def _provider_default_routes(provider: str) -> set[str]:
             f"{route.rstrip('/')}/openai"
             for route in list(routes)
         )
+    if provider == "openrouter" and not routes:
+        routes.add(_normalize_route_base_url("https://openrouter.ai/api/v1"))
+        routes.add(_normalize_route_base_url("https://openrouter.ai/api"))
+    if provider in {"nous", "nous-portal"} and not routes:
+        routes.add(_normalize_route_base_url("https://inference-api.nousresearch.com/v1"))
     return routes
 
 

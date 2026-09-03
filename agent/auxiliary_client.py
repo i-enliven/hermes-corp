@@ -854,6 +854,8 @@ def _fast_model_from_catalog(provider_id: str) -> str:
 
         if not base_url:
             base_url = str(getattr(get_provider_profile(provider_id), "base_url", "") or "")
+        if not base_url and provider_id in {"nous", "nous-portal", "nousresearch"}:
+            base_url = "https://inference-api.nousresearch.com/v1"
         base_url = base_url.rstrip("/")
         if not base_url:
             return ""

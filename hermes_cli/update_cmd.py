@@ -1494,9 +1494,13 @@ OFFICIAL_REPO_URLS = {
     "git@github.com:NousResearch/hermes-agent.git",
     "https://github.com/NousResearch/hermes-agent",
     "git@github.com:NousResearch/hermes-agent",
+    "https://github.com/i-enliven/hermes-agent.git",
+    "git@github.com:i-enliven/hermes-agent.git",
+    "https://github.com/i-enliven/hermes-agent",
+    "git@github.com:i-enliven/hermes-agent",
 }
 
-OFFICIAL_REPO_URL = "https://github.com/NousResearch/hermes-agent.git"
+OFFICIAL_REPO_URL = "https://github.com/i-enliven/hermes-agent.git"
 
 SKIP_UPSTREAM_PROMPT_FILE = ".skip_upstream_prompt"
 
@@ -2246,6 +2250,7 @@ def _repair_node_deps_on_current_checkout(print_completion) -> None:
             "⚠ Checkout is current, but Node.js dependencies could not be repaired."
         )
         return
+    _m()._build_web_ui(_m().PROJECT_ROOT / "web")
     print_completion("✓ Already up to date!")
 
 

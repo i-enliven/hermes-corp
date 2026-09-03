@@ -25,7 +25,7 @@ SUPPRESSION = "# gateway-utf8: ok"
 
 def _find_violations():
     violations = []
-    py_files = list(GATEWAY_DIR.rglob("*.py")) + list(UPDATE_RESPONSE_FILES)
+    py_files = [f for f in list(GATEWAY_DIR.rglob("*.py")) + list(UPDATE_RESPONSE_FILES) if f.is_file()]
     for py_file in sorted(py_files):
         source = py_file.read_text(encoding="utf-8")
         source_lines = source.splitlines()

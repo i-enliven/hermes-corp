@@ -50,11 +50,15 @@ class TestApprovalInterrupt:
         os.environ.pop("HERMES_YOLO_MODE", None)
         os.environ["HERMES_GATEWAY_SESSION"] = "1"
         os.environ["HERMES_SESSION_KEY"] = self.SESSION_KEY
+        from tools import approval as _approval_mod
+        self._orig_get_approval_config = _approval_mod._get_approval_config
 
     def teardown_method(self):
         from tools.interrupt import set_interrupt
         from tools import interrupt as _interrupt_mod
+        from tools import approval as _approval_mod
 
+        _approval_mod._get_approval_config = self._orig_get_approval_config
         with _interrupt_mod._lock:
             _interrupt_mod._interrupted_threads.clear()
         set_interrupt(False)

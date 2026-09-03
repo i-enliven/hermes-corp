@@ -111,8 +111,6 @@ CONFIGURABLE_TOOLSETS = [
     ("clarify",         "❓ Clarifying Questions",      "clarify"),
     ("delegation",      "👥 Task Delegation",           "delegate_task"),
     ("cronjob",         "⏰ Cron Jobs",                 "create/list/update/pause/resume/run, with optional attached skills"),
-    ("homeassistant",    "🏠 Home Assistant",           "smart home device control"),
-    ("spotify",          "🎵 Spotify",                  "playback, search, playlists, library"),
     ("discord",         "💬 Discord (read/participate)", "fetch messages, search members, create thread"),
     ("discord_admin",   "🛡️  Discord Server Admin",    "list channels/roles, pin, assign roles"),
     ("yuanbao",          "🤖 Yuanbao",                  "group info, member queries, DM"),
@@ -149,7 +147,7 @@ def gui_toolset_label(label: str) -> str:
 # `hermes tools` → X (Twitter) Search setup walks users through credential
 # setup. The tool's check_fn means the schema still won't appear to the
 # model if the credential later goes missing or expires.
-_DEFAULT_OFF_TOOLSETS = {"homeassistant", "spotify", "discord", "discord_admin", "video", "video_gen", "x_search", "a2a"}
+_DEFAULT_OFF_TOOLSETS = {"discord", "discord_admin", "video", "video_gen", "x_search", "a2a"}
 
 
 # Config-only capabilities: they appear in `hermes tools` for provider/API-key
@@ -679,18 +677,6 @@ TOOL_CATEGORIES = {
             },
         ],
     },
-    "spotify": {
-        "name": "Spotify",
-        "icon": "🎵",
-        "providers": [
-            {
-                "name": "Spotify Web API",
-                "tag": "PKCE OAuth — opens the setup wizard",
-                "env_vars": [],
-                "post_setup": "spotify",
-            },
-        ],
-    },
     "computer_use": {
         "name": "Computer Use (macOS/Windows/Linux)",
         "icon": "🖱️",
@@ -785,25 +771,12 @@ def _cua_version_summary(raw: str, *, limit: int = 120) -> str:
 
 def _resolved_cua_driver_cmd() -> Optional[str]:
     """Resolve cua-driver exactly as the runtime and Desktop status do."""
-    from tools.computer_use.cua_backend import resolve_cua_driver_cmd
-
-    return resolve_cua_driver_cmd()
+    return None
 
 
 def _cua_driver_env() -> dict:
-    """cua-driver child env with the Hermes telemetry policy applied.
-
-    Delegates to ``cua_backend.cua_driver_child_env`` (telemetry disabled by
-    default; user opt-in via ``computer_use.cua_telemetry``). Falls back to the
-    current environment if the helper can't be imported, so install/status
-    never break on a telemetry-helper error.
-    """
-    try:
-        from tools.computer_use.cua_backend import cua_driver_child_env
-
-        return cua_driver_child_env()
-    except Exception:
-        return dict(os.environ)
+    """cua-driver child env with the Hermes telemetry policy applied."""
+    return dict(os.environ)
 
 
 _CUA_DRIVER_CONTRACT_CACHE: dict = {}
@@ -811,13 +784,7 @@ _CUA_DRIVER_CONTRACT_CACHE: dict = {}
 
 def _cua_driver_contract_status(binary: Optional[str] = None) -> dict:
     """Inspect whether an installed driver supports Hermes' runtime contract."""
-    import time
-
-    from tools.computer_use.cua_backend import cua_driver_runtime_contract_status
-
-    resolved = binary or _resolved_cua_driver_cmd()
-    if not resolved:
-        return cua_driver_runtime_contract_status(None)
+    return {"supported": False, "reason": "pruned"}
     try:
         stat = os.stat(resolved)
         fingerprint = (resolved, stat.st_mtime_ns, stat.st_size)
@@ -1152,11 +1119,6 @@ def install_cua_driver(
     confirmed_version = None
     if binary and not repair_existing:
         _state = None
-        try:
-            from tools.computer_use.cua_backend import cua_driver_update_check
-            _state = cua_driver_update_check()
-        except Exception:
-            _state = None
         if _state is not None and not _state.get("update_available"):
             _print_success(
                 f"    {driver_cmd} is already on the latest release "
@@ -2036,35 +1998,6 @@ def _run_post_setup(post_setup_key: str):
                 return
         _print_info("    No API key required. DuckDuckGo enforces server-side rate limits.")
         _print_info("    Pair with an extract provider if you also need web_extract.")
-
-    elif post_setup_key == "spotify":
-        # Run the full `hermes auth spotify` flow — if the user has no
-        # client_id yet, this drops them into the interactive wizard
-        # (opens the Spotify dashboard, prompts for client_id, persists
-        # to ~/.hermes/.env), then continues straight into PKCE. If they
-        # already have an app, it skips the wizard and just does OAuth.
-        from types import SimpleNamespace
-        try:
-            from hermes_cli.auth import login_spotify_command
-        except Exception as exc:
-            _print_warning(f"    Could not load Spotify auth: {exc}")
-            _print_info("    Run manually: hermes auth spotify")
-            return
-        _print_info("    Starting Spotify login...")
-        try:
-            login_spotify_command(SimpleNamespace(
-                client_id=None, redirect_uri=None, scope=None,
-                no_browser=False, timeout=None,
-            ))
-            _print_success("    Spotify authenticated")
-        except SystemExit as exc:
-            # User aborted the wizard, or OAuth failed — don't fail the
-            # toolset enable; they can retry with `hermes auth spotify`.
-            _print_warning(f"    Spotify login did not complete: {exc}")
-            _print_info("    Run later: hermes auth spotify")
-        except Exception as exc:
-            _print_warning(f"    Spotify login failed: {exc}")
-            _print_info("    Run manually: hermes auth spotify")
 
     elif post_setup_key == "langfuse":
         # Install the langfuse SDK.

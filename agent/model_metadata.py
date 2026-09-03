@@ -135,6 +135,13 @@ def _strip_provider_prefix(model: str) -> str:
         is_provider = get_provider_profile(prefix_lower) is not None
     except Exception:
         is_provider = False
+    if not is_provider:
+        try:
+            from hermes_cli.models import CANONICAL_PROVIDERS
+
+            is_provider = any(getattr(p, "slug", p) == prefix_lower for p in CANONICAL_PROVIDERS)
+        except Exception:
+            pass
     if is_provider:
         # Don't strip if suffix looks like an Ollama tag (e.g. "7b", "latest", "q4_0")
         if _OLLAMA_TAG_PATTERN.match(suffix.strip()):

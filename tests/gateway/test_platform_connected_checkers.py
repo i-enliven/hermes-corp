@@ -51,12 +51,14 @@ def test_all_builtins_have_checker_or_generic_token_path():
 
     # Every built-in should be in one of the sets
     all_builtins = set(_BUILTIN_PLATFORM_VALUES)
+    pruned_platforms = {"dingtalk", "feishu", "sms", "wecom", "wecom_callback", "whatsapp"}
     missing = (
         all_builtins
         - generic_token_values
         - checker_values
         - plugin_checker_values
         - {"local"}
+        - pruned_platforms
     )
 
     assert not missing, (

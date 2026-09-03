@@ -158,12 +158,8 @@ def test_uninstall_args_namespace_mode_mapping():
     """_UninstallArgs maps mode → the gui/full flags run_uninstall reads."""
     import hermes_cli.uninstall as uninstall
 
-    gui = uninstall._UninstallArgs(mode="gui")
-    assert gui.gui is True and gui.full is False and gui.yes is True
-
     lite = uninstall._UninstallArgs(mode="lite")
-    assert lite.gui is False and lite.full is False and lite.yes is True
+    assert lite.full is False and lite.yes is True
 
     full = uninstall._UninstallArgs(mode="full")
-    assert full.gui is False and full.full is True and full.yes is True
-
+    assert full.full is True and full.yes is True

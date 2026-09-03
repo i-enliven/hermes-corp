@@ -65,7 +65,7 @@ def make_env(daytona_sdk, monkeypatch):
     monkeypatch.setattr("tools.credential_files.get_credential_file_mounts", lambda: [])
     monkeypatch.setattr("tools.credential_files.get_skills_directory_mount", lambda **kw: None)
     monkeypatch.setattr("tools.credential_files.iter_skills_files", lambda **kw: [])
-
+    monkeypatch.setattr("tools.lazy_deps.ensure", lambda *a, **kw: None)
     def _factory(
         sandbox=None,
         get_side_effect=None,

@@ -48,34 +48,11 @@ class TestUninstallPathTraversal:
 
     @pytest.fixture
     def hub_setup(self, tmp_path, monkeypatch):
-        """Build a hub directory tree with a malicious lock.json entry.
-
-        ``HubLockFile`` binds its default ``path`` argument at def time
-        against the module-level ``LOCK_FILE`` constant, so monkey-patching
-        ``LOCK_FILE`` alone is not enough — we also need to rebind the
-        function default. Patching ``HubLockFile.__init__.__defaults__``
-        is the standard tool for this.
-        """
-        import tools.skills_hub as hub
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         skills_dir = tmp_path / "skills"
         hub_dir = skills_dir / ".hub"
         hub_dir.mkdir(parents=True)
-        lock_path = hub_dir / "lock.json"
 
-        monkeypatch.setattr(hub, "SKILLS_DIR", skills_dir)
-        monkeypatch.setattr(hub, "HUB_DIR", hub_dir)
-        monkeypatch.setattr(hub, "LOCK_FILE", lock_path)
-        monkeypatch.setattr(hub, "AUDIT_LOG", hub_dir / "audit.log")
-        # Rebind HubLockFile.__init__'s default `path=` arg so
-        # `HubLockFile()` (no args) picks up the new lock path.
-        monkeypatch.setattr(
-            hub.HubLockFile.__init__,
-            "__defaults__",
-            (lock_path,),
-        )
-
-        # A real directory outside skills_dir that the traversal would
-        # delete if the guard fails.
         victim = tmp_path / "do-not-delete"
         victim.mkdir()
         (victim / "important.txt").write_text("data")

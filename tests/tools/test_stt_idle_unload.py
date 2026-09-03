@@ -72,13 +72,17 @@ class TestGetIdleUnloadSeconds:
 
 class TestUnloadLocalModel:
     def test_unloads_when_model_present(self):
-        mock_model = MagicMock(name="whisper_model")
-        with patch.object(tt, "_local_model", mock_model), \
-             patch.object(tt, "_local_model_name", "base"):
+        orig_model = tt._local_model
+        orig_name = tt._local_model_name
+        try:
+            tt._local_model = MagicMock(name="whisper_model")
+            tt._local_model_name = "base"
             _unload_local_model()
-        assert tt._local_model is None
-        assert tt._local_model_name is None
-
+            assert tt._local_model is None
+            assert tt._local_model_name is None
+        finally:
+            tt._local_model = orig_model
+            tt._local_model_name = orig_name
     def test_safe_when_already_none(self):
         with patch.object(tt, "_local_model", None), \
              patch.object(tt, "_local_model_name", None):

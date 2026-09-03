@@ -142,6 +142,14 @@ def _stub_kimi_discovery(monkeypatch, *, canonical):
     monkeypatch.setattr(hm, "cached_provider_model_ids",
                         lambda *a, **k: ["kimi-k2.6", "kimi-k2.5"])
     monkeypatch.setattr(hm, "clear_provider_models_cache", lambda *a, **k: None)
+    import providers
+    def _fake_gpp(slug):
+        if slug in ("kimi", "moonshot", "kimi-coding"):
+            return type("Profile", (), {"name": "kimi-coding"})()
+        if slug == "kimi-coding-cn":
+            return type("Profile", (), {"name": "kimi-coding-cn"})()
+        return None
+    monkeypatch.setattr(providers, "get_provider_profile", _fake_gpp)
 
 
 def test_single_kimi_credential_yields_one_canonical_row(monkeypatch):

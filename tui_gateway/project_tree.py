@@ -123,9 +123,7 @@ def base_name(path: str) -> str:
 
 
 def kanban_worktree_dir(path: str) -> Optional[str]:
-    """The ``<repo>/.worktrees`` dir for a ``.../.worktrees/<task>`` path, else None."""
-    m = _KANBAN_DIR_RE.match(path or "")
-    return m.group(1) if m else None
+    return None
 
 
 def _is_path_under(folder: str, target: str) -> bool:

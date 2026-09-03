@@ -53,7 +53,6 @@ os.environ["HERMES_QUIET"] = "1"  # Our own modules
 from hermes_cli.fallback_config import get_fallback_chain
 from hermes_cli.cli_agent_setup_mixin import CLIAgentSetupMixin
 from hermes_cli.cli_commands_mixin import CLICommandsMixin
-from hermes_cli.cli_billing_mixin import CLIBillingMixin
 from agent.interrupt_compat import request_hard_interrupt
 
 # prompt_toolkit for fixed input area TUI
@@ -4841,7 +4840,7 @@ class _VoiceInputMessage:
         return self.text
 
 
-class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
+class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
     """
     Interactive CLI for the Hermes Agent.
     
@@ -11647,9 +11646,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         elif canonical == "usage":
             self._handle_usage_command(cmd_original)
         elif canonical == "subscription":
-            self._show_subscription()
+            print("\n  ℹ️  Subscriptions are managed centrally by your enterprise administrator.\n")
         elif canonical == "topup":
-            self._show_billing(cmd_original)
+            print("\n  ℹ️  Billing and top-up are disabled in this corporate edition.\n")
         elif canonical == "insights":
             self._show_insights(cmd_original)
         elif canonical == "copy":

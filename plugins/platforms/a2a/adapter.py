@@ -633,6 +633,10 @@ class A2AAdapter(BasePlatformAdapter):
                 for n in names
                 if allowed is None or n in allowed
             }
+            if allowed:
+                for item in allowed:
+                    if item not in mapping:
+                        mapping[item] = []
             if mapping:
                 return protocol.skills_from_toolsets(mapping)
         except Exception:

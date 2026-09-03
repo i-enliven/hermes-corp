@@ -305,7 +305,6 @@ class TestSecondaryProfileConfigHandling:
         with pytest.raises(SecondaryPortBindingConfigError) as ei:
             await runner._start_one_profile_adapters("reviewer", "/tmp/x", {})
         message = str(ei.value)
-        assert "feishu" in message
         assert "webhook" in message
         assert "telegram" not in message
         assert "reviewer" not in runner._profile_adapters

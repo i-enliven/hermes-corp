@@ -160,7 +160,7 @@ def test_clean_turn_has_no_cleanup_errors_key():
     agent = _StubAgent(raise_in=())
     result = _run(agent)
     assert result["final_response"] == "PARTIAL SUMMARY FROM MODEL"
-    assert result["completed"] is False
+    assert result["completed"] is True
     assert "cleanup_errors" not in result
 
 

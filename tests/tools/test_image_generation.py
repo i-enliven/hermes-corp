@@ -419,13 +419,13 @@ class TestManagedGatewayErrorTranslation:
         managed_gateway.nous_user_token = "test-token"
         monkeypatch.setattr(image_tool, "_resolve_managed_fal_gateway",
                             lambda: managed_gateway)
+        monkeypatch.setattr(image_tool, "fal_client", MagicMock())
 
         bad_request = _MockHttpxError(403, "Forbidden")
         mock_managed_client = MagicMock()
         mock_managed_client.submit.side_effect = bad_request
         monkeypatch.setattr(image_tool, "_get_managed_fal_client",
                             lambda gw: mock_managed_client)
-
         with pytest.raises(ValueError) as exc_info:
             image_tool._submit_fal_request("fal-ai/nano-banana-pro", {"prompt": "x"})
 
@@ -446,13 +446,13 @@ class TestManagedGatewayErrorTranslation:
         managed_gateway = MagicMock()
         monkeypatch.setattr(image_tool, "_resolve_managed_fal_gateway",
                             lambda: managed_gateway)
+        monkeypatch.setattr(image_tool, "fal_client", MagicMock())
 
         conn_error = ConnectionError("network down")
         mock_managed_client = MagicMock()
         mock_managed_client.submit.side_effect = conn_error
         monkeypatch.setattr(image_tool, "_get_managed_fal_client",
                             lambda gw: mock_managed_client)
-
         with pytest.raises(ConnectionError):
             image_tool._submit_fal_request("fal-ai/flux-2-pro", {"prompt": "x"})
 

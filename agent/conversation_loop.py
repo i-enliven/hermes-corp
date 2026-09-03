@@ -577,16 +577,7 @@ def _billing_or_entitlement_message(
 
     # Provider-agnostic billing URL derivation (OpenAI, DeepSeek, xAI, Groq,
     # OpenRouter, …) so every text surface — CLI, gateway messaging, TUI
-    # transcript — shows the same actionable link, not just OpenRouter.
-    try:
-        from agent.billing_links import build_billing_block
-
-        _link = build_billing_block(provider=provider, base_url=base_url, model=model)
-        if _link.provider_label:
-            provider_label = _link.provider_label
-        billing_url = _link.billing_url
-    except Exception:
-        billing_url = None
+    billing_url = None
 
     lines = [
         (
@@ -595,8 +586,6 @@ def _billing_or_entitlement_message(
         ),
         "Add credits or update billing with that provider, then retry.",
     ]
-    if billing_url:
-        lines.append(f"{provider_label} billing: {billing_url}")
     lines.append("You can switch providers temporarily with /model <model> --provider <provider>.")
     return "\n".join(lines)
 
@@ -604,21 +593,8 @@ def _billing_or_entitlement_message(
 def _billing_block_dict(
     provider, base_url, model, message="", *, unverified: bool = False
 ) -> Optional[dict]:
-    """Best-effort structured billing descriptor (None if billing_links is unavailable)."""
-    try:
-        from agent.billing_links import build_billing_block
-
-        block = build_billing_block(
-            provider=provider, base_url=str(base_url), model=model, message=message
-        ).to_dict()
-    except Exception:
-        return None
-    if block is not None and unverified:
-        # Carry the classifier's ambiguity into the structured descriptor so
-        # every surface rendering the block can hedge too (#82154).
-        block["unverified"] = True
-    return block
-
+    """Best-effort structured billing descriptor (None in corporate edition)."""
+    return None
 
 def _billing_terminal_label(summary: str, unverified: bool) -> str:
     """Terminal-failure prefix for a billing-classified error.

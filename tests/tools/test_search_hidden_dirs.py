@@ -172,16 +172,7 @@ class TestIgnoreFileWritten:
     def test_write_index_cache_creates_ignore_file(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
-        # Patch module-level paths
         import tools.skills_hub as hub_mod
-        monkeypatch.setattr(hub_mod, "HERMES_HOME", tmp_path)
-        monkeypatch.setattr(hub_mod, "SKILLS_DIR", tmp_path / "skills")
-        monkeypatch.setattr(hub_mod, "HUB_DIR", tmp_path / "skills" / ".hub")
-        monkeypatch.setattr(
-            hub_mod, "INDEX_CACHE_DIR",
-            tmp_path / "skills" / ".hub" / "index-cache",
-        )
-
         hub_mod._write_index_cache("test_key", {"data": "test"})
 
         ignore_file = tmp_path / "skills" / ".hub" / ".ignore"
@@ -195,13 +186,6 @@ class TestIgnoreFileWritten:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
         import tools.skills_hub as hub_mod
-        monkeypatch.setattr(hub_mod, "HERMES_HOME", tmp_path)
-        monkeypatch.setattr(hub_mod, "SKILLS_DIR", tmp_path / "skills")
-        monkeypatch.setattr(hub_mod, "HUB_DIR", tmp_path / "skills" / ".hub")
-        monkeypatch.setattr(
-            hub_mod, "INDEX_CACHE_DIR",
-            tmp_path / "skills" / ".hub" / "index-cache",
-        )
 
         hub_dir = tmp_path / "skills" / ".hub"
         hub_dir.mkdir(parents=True)

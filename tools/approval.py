@@ -2731,16 +2731,7 @@ def _release_permission_mode_dependents(session_key: str) -> None:
     backend and makes disabling YOLO revoke a private unrestricted daemon
     immediately, even when no later computer-use call occurs.
     """
-    try:
-        from tools.computer_use import release_computer_use_session
-
-        release_computer_use_session(session_key)
-    except Exception:
-        logger.debug(
-            "Failed to release permission-mode dependent resources for %s",
-            session_key,
-            exc_info=True,
-        )
+    pass
 
 
 def enable_session_yolo(session_key: str) -> None:

@@ -168,11 +168,7 @@ def _read_allowlist_env(env_var: str) -> str:
         from agent.secret_scope import UnscopedSecretError, get_secret
 
         try:
-            value = (get_secret(env_var) or "").strip()
-            if value:
-                return value
-            # Scoped empty reads fall through to the process env so pairing
-            # mutations on a single-profile gateway still see seeded envs.
+            return (get_secret(env_var) or "").strip()
         except UnscopedSecretError:
             pass
     except Exception:

@@ -4507,18 +4507,6 @@ class AIAgent:
         except Exception:
             pass
 
-        # 4. Release the session-owned computer-use backend.  This ends the
-        # exact cua-driver session, drops typed-browser refs/grants, and stops
-        # a private embedded daemon when Hermes YOLO selected unrestricted
-        # mode.  The import is lazy so sessions without computer_use retain
-        # the narrow core footprint.
-        try:
-            from tools.computer_use import release_computer_use_session
-
-            release_computer_use_session(task_id)
-        except Exception:
-            pass
-
         # 5. Close active child agents
         try:
             with self._active_children_lock:

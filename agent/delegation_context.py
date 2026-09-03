@@ -34,16 +34,7 @@ _NON_DISPATCHER_OWNED_CONTEXT: ContextVar[bool] = ContextVar(
 
 DELEGATED_CHILD_ENV_MARKER = "HERMES_DELEGATED_CHILD_CONTEXT"
 
-KANBAN_ENV_KEYS: tuple[str, ...] = (
-    "HERMES_KANBAN_TASK",
-    "HERMES_KANBAN_RUN_ID",
-    "HERMES_KANBAN_WORKSPACE",
-    "HERMES_KANBAN_WORKSPACES_ROOT",
-    "HERMES_KANBAN_CLAIM_LOCK",
-    "HERMES_KANBAN_BOARD",
-    "HERMES_KANBAN_DB",
-)
-
+KANBAN_ENV_KEYS: tuple[str, ...] = ()
 
 @contextmanager
 def delegated_child_context(session_id: str | None = None) -> Iterator[None]:
@@ -95,15 +86,8 @@ def non_dispatcher_owned_context() -> Iterator[None]:
 
 
 def is_dispatcher_owned_worker_context() -> bool:
-    """Return True only when this execution owns the dispatcher's Kanban task.
-
-    The single predicate every ``HERMES_KANBAN_*`` identity gate should use
-    before trusting those vars.  False for delegate_task children and for cron
-    jobs fired in-process from a worker.
-    """
-    if _DELEGATED_CHILD_CONTEXT.get():
-        return False
-    return not _NON_DISPATCHER_OWNED_CONTEXT.get()
+    """Return False: Kanban dispatcher workers are pruned."""
+    return False
 
 
 def enter_non_dispatcher_owned_context() -> Token[bool]:

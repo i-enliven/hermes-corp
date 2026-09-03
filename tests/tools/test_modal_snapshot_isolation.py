@@ -122,6 +122,7 @@ def _install_modal_test_modules(
         _file_mtime_key=_file_mtime_key,
     )
     sys.modules["tools.interrupt"] = types.SimpleNamespace(is_interrupted=lambda: False)
+    sys.modules["tools.lazy_deps"] = types.SimpleNamespace(ensure=lambda *a, **kw: None)
     sys.modules["tools.credential_files"] = types.SimpleNamespace(
         get_credential_file_mounts=lambda: [],
         iter_skills_files=lambda **kw: [],
