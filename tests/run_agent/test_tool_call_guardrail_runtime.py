@@ -478,6 +478,75 @@ def test_sequence_loop_hard_stop_blocks_execution():
     assert d_before.code == "sequence_repeat_block"
 
 
+def test_turn_resuming_after_a_discussion_of_guardrails_does_not_fabricate_a_strategy_shift():
+    """A turn that only discusses guardrails must not earn the next turn a strategy shift.
+
+    The recovery-by-prose scan decided a halt had happened by matching halt
+    wording in the most recent assistant message. An assistant turn quoting that
+    wording while explaining the mechanism therefore caused the following user
+    message to reach the model carrying a fabricated "the previous turn was
+    halted by a tool-call guardrail" system instruction, on a turn where no
+    guardrail had fired.
+
+    Driven through the public conversation entry point with the prior exchange
+    supplied as the session transcript, the way a resumed session presents it,
+    so the guarantee covers the whole journey and not just the prologue.
+    """
+    agent = _make_agent("web_search")
+    agent._disable_streaming = True
+
+    # The halt wording, assembled from parts so this fixture can quote it without
+    # embedding it as one contiguous literal.
+    halt_wording = "hit the " "tool-call " "guardrail"
+
+    # Turn one: an ordinary prose answer that happens to quote the halt wording.
+    agent.client.chat.completions.create.side_effect = [
+        _mock_response(
+            content=(
+                f"I stopped retrying terminal because it {halt_wording} "
+                "(sequence_repeat_halt) when a command kept failing identically."
+            ),
+            finish_reason="stop",
+        )
+    ]
+    with (
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        first = agent.run_conversation("how do the tool loop guardrails work?")
+
+    # Nothing halted: the quoted wording was prose, not an event.
+    assert first["turn_exit_reason"] != "guardrail_halt"
+    assert halt_wording in (first["final_response"] or "")
+
+    # Turn two: an ordinary follow-up on the same live agent, with the first
+    # turn's exchange threaded forward the way any caller threads a transcript.
+    captured: list = []
+
+    def _capture(**kwargs):
+        captured.extend(kwargs.get("messages", []))
+        return _mock_response(content="Glad that helped.", finish_reason="stop")
+
+    agent.client.chat.completions.create.side_effect = _capture
+    with (
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        agent.run_conversation(
+            "thanks, that is clear",
+            conversation_history=[
+                {"role": "user", "content": "how do the tool loop guardrails work?"},
+                {"role": "assistant", "content": first["final_response"]},
+            ],
+        )
+
+    user_msgs = [m for m in captured if m.get("role") == "user"]
+    assert user_msgs, "the follow-up turn never reached the model"
+    assert "MANDATORY STRATEGY SHIFT" not in (user_msgs[-1].get("content") or "")
+
+
 def test_turn_resumption_after_guardrail_halt_injects_strategy_shift():
     agent = _make_agent("web_search", max_iterations=10, config=_hard_stop_config())
     same_args = {"query": "same"}

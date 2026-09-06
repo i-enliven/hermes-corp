@@ -151,49 +151,33 @@ def consume_gateway_turn_context_notes(agent: Any) -> str:
     return notes if isinstance(notes, str) else ""
 
 
-GUARDRAIL_HALT_RESUMPTION_INSTRUCTION = (
-    "[System Instruction: The previous turn was halted by a tool-call guardrail due to repeated unprogressing actions. "
-    "MANDATORY STRATEGY SHIFT: Do NOT immediately emit another inspection or tool call. "
-    "You must first summarize what you have learned so far from your previous attempts, explain the blocker, "
-    "and ask the user for guidance or propose an alternative strategy before executing any more tools.]"
-)
+def consume_guardrail_resumption_note(agent: Any) -> str:
+    """Consume the pending resumption handoff and render its strategy-shift note (one-shot).
 
+    The in-memory handoff recorded by the turn finalizer is the only route to a
+    resumption note. Deciding that a halt happened by matching halt wording in
+    message text was removed: an assistant message that merely quoted that
+    wording while discussing guardrails caused the following user message to be
+    delivered with a fabricated system instruction. A halt that was never
+    recorded on the agent therefore yields no note; durability across process
+    boundaries is the halt record's job, not this function's.
 
-def consume_guardrail_resumption_note(agent: Any, messages: List[Dict[str, Any]]) -> str:
-    """Consume pending guardrail-halt resumption instruction (one-shot).
-
-    When a turn resumes after a guardrail halt, inject an explicit system
-    instruction requiring the model to summarize what it has learned and ask
-    for guidance instead of immediately retrying another inspection tool.
     Delivered on the user message via the api_content sidecar to maintain
     byte-stable prefix caching and strict role alternation.
     """
     halt_decision = getattr(agent, "_pending_guardrail_halt_resumption", None)
-    if halt_decision is not None:
-        agent._pending_guardrail_halt_resumption = None
-        tool_str = f" on '{halt_decision.tool_name}'" if getattr(halt_decision, "tool_name", None) else ""
-        return (
-            f"[System Instruction: The previous turn was halted by a tool-call guardrail{tool_str} "
-            f"({getattr(halt_decision, 'code', 'guardrail_halt')}) due to repeated unprogressing actions. "
-            "MANDATORY STRATEGY SHIFT: Do NOT immediately emit another inspection or tool call. "
-            "You must first summarize what you have learned so far from your previous attempts, explain the blocker, "
-            "and ask the user for guidance or propose an alternative strategy before executing any more tools.]"
-        )
+    if halt_decision is None:
+        return ""
 
-    # Fallback for cross-process / reloaded sessions: check preceding assistant message
-    if messages and len(messages) >= 2:
-        for msg in reversed(messages[:-1]):
-            if not isinstance(msg, dict):
-                continue
-            role = msg.get("role")
-            if role == "assistant":
-                content = str(msg.get("content") or "")
-                if "hit the tool-call guardrail" in content:
-                    return GUARDRAIL_HALT_RESUMPTION_INSTRUCTION
-                break
-            if role == "user":
-                break
-    return ""
+    agent._pending_guardrail_halt_resumption = None
+    tool_str = f" on '{halt_decision.tool_name}'" if getattr(halt_decision, "tool_name", None) else ""
+    return (
+        f"[System Instruction: The previous turn was halted by a tool-call guardrail{tool_str} "
+        f"({getattr(halt_decision, 'code', 'guardrail_halt')}) due to repeated unprogressing actions. "
+        "MANDATORY STRATEGY SHIFT: Do NOT immediately emit another inspection or tool call. "
+        "You must first summarize what you have learned so far from your previous attempts, explain the blocker, "
+        "and ask the user for guidance or propose an alternative strategy before executing any more tools.]"
+    )
 
 
 def append_notes_to_multimodal_content(content: Any, notes: str) -> bool:
@@ -1293,7 +1277,7 @@ def build_turn_context(
     # When a turn resumes after a guardrail halt, inject an explicit system
     # instruction enforcing a strategy shift (summarize findings + ask for
     # guidance) rather than immediately emitting another inspection tool.
-    _guardrail_notes = consume_guardrail_resumption_note(agent, messages)
+    _guardrail_notes = consume_guardrail_resumption_note(agent)
     if _guardrail_notes:
         _gw_turn_content = (
             messages[current_turn_user_idx].get("content")

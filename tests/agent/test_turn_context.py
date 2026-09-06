@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import types
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -77,6 +78,10 @@ class _FakeAgent:
         self._user_turn_count = 0
         self._todo_store = _FakeTodoStore()
         self._tool_guardrails = _FakeGuardrails()
+        # The resumption handoff: set by the turn finalizer after a guardrail
+        # halt, consumed once by the prologue. Declared so the fake states what
+        # it carries rather than relying on getattr defaults.
+        self._pending_guardrail_halt_resumption: Any = None
         self._compression_warning = None
         self._emit_warning = MagicMock()
         self._last_ctx_overflow_warn = None
@@ -472,20 +477,30 @@ def test_guardrail_halt_resumption_injects_strategy_shift_instruction():
     assert agent._pending_guardrail_halt_resumption is None
 
 
-def test_guardrail_halt_resumption_history_fallback_and_one_shot():
-    agent = _FakeAgent()
-    # Simulate history ending in guardrail halt assistant message
-    history = [
-        {"role": "user", "content": "run tests"},
-        {"role": "assistant", "content": "I stopped retrying terminal because it hit the tool-call guardrail (sequence_repeat_halt)."},
-    ]
-    ctx1 = _build(agent, conversation_history=history, user_message="continue")
-    assert "api_content" in ctx1.messages[-1]
-    assert "MANDATORY STRATEGY SHIFT" in ctx1.messages[-1]["api_content"]
+def test_discussing_guardrails_in_prose_does_not_fabricate_a_strategy_shift():
+    """An assistant message that merely discusses a halt must not instruct the next turn.
 
-    # Next normal turn does NOT have the instruction
-    history2 = list(ctx1.messages)
-    history2.append({"role": "assistant", "content": "Here is the summary of what happened..."})
-    ctx2 = _build(agent, conversation_history=history2, user_message="sounds good, try option B")
-    user_msg2 = ctx2.messages[-1]
-    assert "MANDATORY STRATEGY SHIFT" not in (user_msg2.get("api_content") or "")
+    The recovery-by-prose scan decided a halt had happened by matching halt
+    wording in the most recent assistant message. An assistant turn quoting
+    that wording while explaining the mechanism therefore caused the following
+    user message to be delivered carrying a fabricated "the previous turn was
+    halted by a tool-call guardrail" system instruction, on a turn where no
+    guardrail had fired.
+    """
+    agent = _FakeAgent()
+
+    # The assistant is writing about guardrails and quotes the halt wording,
+    # which is exactly what the scan matched on.
+    history = [
+        {"role": "user", "content": "how do the tool loop guardrails work?"},
+        {
+            "role": "assistant",
+            "content": (
+                "When a tool stops making progress, I stopped retrying terminal "
+                "because it hit the tool-call guardrail (sequence_repeat_halt), and "
+                "the turn was halted so you could change strategy."
+            ),
+        },
+    ]
+    ctx = _build(agent, conversation_history=history, user_message="thanks, that is clear")
+    assert "MANDATORY STRATEGY SHIFT" not in (ctx.messages[-1].get("api_content") or "")
