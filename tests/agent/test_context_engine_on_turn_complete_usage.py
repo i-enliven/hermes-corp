@@ -25,6 +25,7 @@ from agent.context_engine import ContextEngine
 
 # Reuse the minimal agent harness that exercises the real finalize_turn path.
 from tests.agent.test_turn_finalizer_cleanup_guard import _StubAgent, _run
+from tests.turn_state_test_helpers import turn_state
 
 
 class _CapturingEngine(ContextEngine):
@@ -131,10 +132,8 @@ def test_finalization_seam_observes_interrupted_turn_with_none_usage():
 
     finalize_turn(
         agent,
+        turn_state(api_call_count=1, interrupted=True, failed=False, turn_exit_reason="interrupt"),
         final_response="interrupted mid-turn",
-        api_call_count=1,
-        interrupted=True,
-        failed=False,
         messages=[
             {"role": "user", "content": "do a thing"},
             {"role": "assistant", "content": "partial"},
@@ -145,7 +144,6 @@ def test_finalization_seam_observes_interrupted_turn_with_none_usage():
         user_message="do a thing",
         original_user_message="do a thing",
         _should_review_memory=False,
-        _turn_exit_reason="interrupt",
     )
 
     captured = agent.context_compressor.captured

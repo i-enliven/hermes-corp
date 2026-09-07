@@ -15,8 +15,8 @@ an empty-content assistant turn.
 
 import pytest
 
-from agent.tool_guardrails import TurnGuardrailState
 from agent.turn_finalizer import finalize_turn
+from tests.turn_state_test_helpers import turn_state
 
 
 class _StubBudget:
@@ -44,7 +44,6 @@ class _StubAgent:
         self.platform = "cli"
         self._interrupt_requested = False
         self._interrupt_message = None
-        self._guardrail_state = TurnGuardrailState()
         self._response_was_previewed = False
         self._skill_nudge_interval = 0
         self._iters_since_skill = 0
@@ -123,10 +122,8 @@ def _interrupted_tool_tail():
 def _finalize(agent, messages, *, interrupted, final_response=None):
     return finalize_turn(
         agent,
+        turn_state(api_call_count=1, interrupted=interrupted, failed=False, turn_exit_reason="interrupted_by_user"),
         final_response=final_response,
-        api_call_count=1,
-        interrupted=interrupted,
-        failed=False,
         messages=messages,
         conversation_history=None,
         effective_task_id="task-1",
@@ -134,7 +131,6 @@ def _finalize(agent, messages, *, interrupted, final_response=None):
         user_message="edit the file",
         original_user_message="edit the file",
         _should_review_memory=False,
-        _turn_exit_reason="interrupted_by_user",
     )
 
 

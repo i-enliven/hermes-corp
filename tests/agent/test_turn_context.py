@@ -15,7 +15,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.context_compressor import ContextCompressor
-from agent.tool_guardrails import ToolGuardrailDecision, TurnGuardrailState
+from agent.tool_guardrails import ToolGuardrailDecision
+from agent.turn_state import AgentTurnState
 from agent.turn_context import TurnContext, build_turn_context
 from hermes_state import SessionDB
 
@@ -81,7 +82,7 @@ class _FakeAgent:
         # The turn's guardrail facts. The real value object, not a stub: it has
         # no dependencies, and carrying the real thing means the prologue's read
         # path is genuinely exercised instead of satisfied by a mock default.
-        self._guardrail_state = TurnGuardrailState()
+        self._turn_state = AgentTurnState()
         self._compression_warning = None
         self._emit_warning = MagicMock()
         self._last_ctx_overflow_warn = None
@@ -462,7 +463,7 @@ def test_prologue_does_not_title_machine_driven_runs(platform):
 def test_guardrail_halt_resumption_injects_strategy_shift_instruction():
     from agent.tool_guardrails import ToolGuardrailDecision
     agent = _FakeAgent()
-    agent._guardrail_state.arm_resumption(
+    agent._turn_state.guardrails.arm_resumption(
         ToolGuardrailDecision(
             action="halt",
             code="sequence_repeat_halt",
@@ -476,7 +477,7 @@ def test_guardrail_halt_resumption_injects_strategy_shift_instruction():
     assert "MANDATORY STRATEGY SHIFT: Do NOT immediately emit another inspection or tool call." in api_content
     assert "summarize what you have learned so far" in api_content
     # One-shot: spent, so a later turn is not instructed again.
-    assert agent._guardrail_state.pending_resumption is None
+    assert agent._turn_state.guardrails.pending_resumption is None
 
 
 def test_discussing_guardrails_in_prose_does_not_fabricate_a_strategy_shift():

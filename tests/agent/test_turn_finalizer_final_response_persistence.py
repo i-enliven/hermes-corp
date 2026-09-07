@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 from typing import Any
 
-from agent.tool_guardrails import TurnGuardrailState
 from agent.turn_finalizer import finalize_turn
+from tests.turn_state_test_helpers import turn_state
 
 
 class FakeAgent:
@@ -26,7 +26,6 @@ class FakeAgent:
         self.session_estimated_cost_usd = 0
         self.session_cost_status = "unknown"
         self.session_cost_source = "test"
-        self._guardrail_state = TurnGuardrailState()
         self._interrupt_message = None
         self._response_was_previewed = True
         self._skill_nudge_interval = 0
@@ -110,10 +109,8 @@ def test_final_response_closes_tool_tail_before_persistence(monkeypatch):
 
     result = finalize_turn(
         agent,
+        turn_state(api_call_count=2, interrupted=False, failed=False, turn_exit_reason="fallback_prior_turn_content"),
         final_response="Done.",
-        api_call_count=2,
-        interrupted=False,
-        failed=False,
         messages=messages,
         conversation_history=[],
         effective_task_id="task",
@@ -121,7 +118,6 @@ def test_final_response_closes_tool_tail_before_persistence(monkeypatch):
         user_message="do it",
         original_user_message="do it",
         _should_review_memory=False,
-        _turn_exit_reason="fallback_prior_turn_content",
     )
 
     assert result["messages"][-1]["role"] == "assistant"
@@ -159,10 +155,8 @@ def test_fallback_timestamp_survives_delayed_sqlite_persistence(
 
     finalize_turn(
         agent,
+        turn_state(api_call_count=2, interrupted=False, failed=False, turn_exit_reason="fallback_prior_turn_content"),
         final_response="Done.",
-        api_call_count=2,
-        interrupted=False,
-        failed=False,
         messages=messages,
         conversation_history=[],
         effective_task_id="task",
@@ -170,7 +164,6 @@ def test_fallback_timestamp_survives_delayed_sqlite_persistence(
         user_message="do it",
         original_user_message="do it",
         _should_review_memory=False,
-        _turn_exit_reason="fallback_prior_turn_content",
     )
 
     assert agent.persisted_messages[-1]["timestamp"] == created_at
@@ -202,10 +195,8 @@ def test_final_response_fills_pure_tool_call_tail(monkeypatch):
 
     result = finalize_turn(
         agent,
+        turn_state(api_call_count=3, interrupted=False, failed=False, turn_exit_reason="text_response(final)"),
         final_response="Here is your answer.",
-        api_call_count=3,
-        interrupted=False,
-        failed=False,
         messages=messages,
         conversation_history=[],
         effective_task_id="t",
@@ -213,7 +204,6 @@ def test_final_response_fills_pure_tool_call_tail(monkeypatch):
         user_message="q",
         original_user_message="q",
         _should_review_memory=False,
-        _turn_exit_reason="text_response(final)",
     )
 
     persisted = agent.persisted_messages
@@ -257,10 +247,8 @@ def test_final_response_fill_invalidates_flush_scan_cursor():
 
     finalize_turn(
         agent,
+        turn_state(api_call_count=3, interrupted=False, failed=False, turn_exit_reason="text_response(final)"),
         final_response="Here is your answer.",
-        api_call_count=3,
-        interrupted=False,
-        failed=False,
         messages=messages,
         conversation_history=[],
         effective_task_id="t",
@@ -268,7 +256,6 @@ def test_final_response_fill_invalidates_flush_scan_cursor():
         user_message="q",
         original_user_message="q",
         _should_review_memory=False,
-        _turn_exit_reason="text_response(final)",
     )
 
     assert agent._db_flush_scan_prefix is None

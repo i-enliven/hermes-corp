@@ -113,7 +113,7 @@ def test_default_sequential_path_warns_repeated_exact_failure_without_blocking_e
     assert "repeated_exact_failure_warning" in messages[0]["content"]
     assert "repeated_exact_failure_block" not in messages[0]["content"]
     # Nothing stopped the turn: the guardrail account of the turn is empty.
-    assert agent._guardrail_state.halt_decision is None
+    assert agent._turn_state.guardrails.halt_decision is None
 
 
 def test_config_enabled_hard_stop_blocks_repeated_exact_failure_before_execution():
@@ -383,7 +383,7 @@ def test_a_halted_turn_reports_its_guardrail_record_and_arms_the_resumption():
     assert result["guardrail"]["tool_name"] == "web_search"
     assert result["guardrail"]["count"] >= 1
     # And the handoff to the turn that follows is armed, exactly once.
-    assert agent._guardrail_state.pending_resumption is not None
+    assert agent._turn_state.guardrails.pending_resumption is not None
 
 
 def test_the_first_decision_to_stop_the_turn_is_the_one_the_user_is_told_about():
@@ -444,17 +444,15 @@ def test_the_first_decision_to_stop_the_turn_is_the_one_the_user_is_told_about()
     # and that rejection is the behaviour under test.
     arrived: list = []
     accepted: list = []
-    real_record_halt = agent._guardrail_state.record_halt
+    real_record_halt = TurnGuardrailState.record_halt
 
-    def _spy_record_halt(decision):
-        was_accepted = real_record_halt(decision)
+    def _spy_record_halt(self, decision):
+        was_accepted = real_record_halt(self, decision)
         if decision is not None and decision.should_halt:
             arrived.append(decision)
         if was_accepted:
             accepted.append(decision)
         return was_accepted
-
-    agent._guardrail_state.record_halt = _spy_record_halt
 
     search_a = {"query": "alpha"}
     search_b = {"query": "beta"}
@@ -479,6 +477,7 @@ def test_the_first_decision_to_stop_the_turn_is_the_one_the_user_is_told_about()
 
     with (
         patch("run_agent.handle_function_call", side_effect=_execute),
+        patch.object(TurnGuardrailState, "record_halt", _spy_record_halt),
         patch.object(agent, "_persist_session"),
         patch.object(agent, "_save_trajectory"),
         patch.object(agent, "_cleanup_task_resources"),
@@ -494,7 +493,7 @@ def test_the_first_decision_to_stop_the_turn_is_the_one_the_user_is_told_about()
     # Only one of them may be the cause.
     assert len(accepted) == 1, f"expected exactly one accepted cause, got {[d.code for d in accepted]}"
 
-    cause = agent._guardrail_state.halt_decision
+    cause = agent._turn_state.guardrails.halt_decision
     assert cause is not None
 
     # The cause is the first decision that stopped the turn, not the last.
@@ -507,7 +506,7 @@ def test_the_first_decision_to_stop_the_turn_is_the_one_the_user_is_told_about()
     assert cause.code in result["final_response"]
     # The note owed to the following turn names the same guardrail, so the model
     # is told to change strategy about the thing that actually stopped it.
-    assert agent._guardrail_state.pending_resumption is cause
+    assert agent._turn_state.guardrails.pending_resumption is cause
 
 
 
@@ -740,7 +739,7 @@ def test_turn_resumption_after_guardrail_halt_injects_strategy_shift():
 
     assert result1["turn_exit_reason"] == "guardrail_halt"
     # The halt was handed over to the turn that follows.
-    assert agent._guardrail_state.pending_resumption is not None
+    assert agent._turn_state.guardrails.pending_resumption is not None
 
     # Turn 2: user replies "what should we do next?"
     captured_messages = []
@@ -771,5 +770,5 @@ def test_turn_resumption_after_guardrail_halt_injects_strategy_shift():
     # The turn that received the note records the delivery on the one object that
     # holds the guardrail facts, so the handoff's whole journey is observable: the
     # halted turn armed it, this turn spent it.
-    assert agent._guardrail_state.resumption_delivered is not None
-    assert agent._guardrail_state.pending_resumption is None
+    assert agent._turn_state.guardrails.resumption_delivered is not None
+    assert agent._turn_state.guardrails.pending_resumption is None

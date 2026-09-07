@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 from run_agent import AIAgent
 from agent.turn_finalizer import finalize_turn
+from tests.turn_state_test_helpers import turn_state
 
 
 def _make_agent(skip_background_review: bool = False) -> AIAgent:
@@ -64,10 +65,8 @@ def _run_finalize(agent: AIAgent) -> None:
     """Call finalize_turn with conditions that would trigger background review."""
     finalize_turn(
         agent,
+        turn_state(api_call_count=1, interrupted=False, failed=False, turn_exit_reason="text_response(1)"),
         final_response="ok",
-        api_call_count=1,
-        interrupted=False,
-        failed=False,
         messages=[{"role": "assistant", "content": "ok"}],
         conversation_history=[],
         effective_task_id="test",
@@ -75,7 +74,6 @@ def _run_finalize(agent: AIAgent) -> None:
         user_message="test",
         original_user_message="test",
         _should_review_memory=True,
-        _turn_exit_reason="text_response(1)",
     )
 
 

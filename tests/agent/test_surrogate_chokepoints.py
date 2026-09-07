@@ -29,6 +29,7 @@ from agent.message_sanitization import (
 )
 from agent.turn_finalizer import finalize_turn
 from tests.agent.test_turn_finalizer_final_response_persistence import FakeAgent
+from tests.turn_state_test_helpers import turn_state
 
 LONE_HIGH = "\ud83d"  # unpaired high surrogate (half of an emoji pair)
 LONE_LOW = "\udce7"  # the exact code point reported in #19819
@@ -56,10 +57,8 @@ def test_finalize_turn_scrubs_lone_surrogate_from_final_response(monkeypatch):
 
     result = finalize_turn(
         agent,
+        turn_state(api_call_count=1, interrupted=False, failed=False, turn_exit_reason="text_response(final)"),
         final_response=dirty,
-        api_call_count=1,
-        interrupted=False,
-        failed=False,
         messages=messages,
         conversation_history=[],
         effective_task_id="t",
@@ -67,7 +66,6 @@ def test_finalize_turn_scrubs_lone_surrogate_from_final_response(monkeypatch):
         user_message="q",
         original_user_message="q",
         _should_review_memory=False,
-        _turn_exit_reason="text_response(final)",
     )
 
     final = result["final_response"]
@@ -83,10 +81,8 @@ def test_finalize_turn_leaves_non_string_final_response_alone(monkeypatch):
     agent = FakeAgent()
     result = finalize_turn(
         agent,
+        turn_state(api_call_count=1, interrupted=True, failed=False, turn_exit_reason="interrupted"),
         final_response=None,
-        api_call_count=1,
-        interrupted=True,
-        failed=False,
         messages=[{"role": "user", "content": "q"}],
         conversation_history=[],
         effective_task_id="t",
@@ -94,7 +90,6 @@ def test_finalize_turn_leaves_non_string_final_response_alone(monkeypatch):
         user_message="q",
         original_user_message="q",
         _should_review_memory=False,
-        _turn_exit_reason="interrupted",
     )
     assert result["final_response"] is None
 

@@ -10,8 +10,8 @@ traceback and lost the whole turn.
 
 import pytest
 
-from agent.tool_guardrails import TurnGuardrailState
 from agent.turn_finalizer import finalize_turn
+from tests.turn_state_test_helpers import turn_state
 
 
 class _StubBudget:
@@ -40,7 +40,6 @@ class _StubAgent:
         self.platform = "cli"
         self._interrupt_requested = False
         self._interrupt_message = None
-        self._guardrail_state = TurnGuardrailState()
         self._response_was_previewed = False
         self._skill_nudge_interval = 0
         self._iters_since_skill = 0
@@ -121,10 +120,8 @@ def _run(
     ]
     return finalize_turn(
         agent,
+    turn_state(api_call_count=api_call_count, interrupted=False, failed=False, turn_exit_reason=turn_exit_reason),
         final_response=final_response,
-        api_call_count=api_call_count,
-        interrupted=False,
-        failed=False,
         messages=messages,
         conversation_history=None,
         effective_task_id="task-1",
@@ -132,7 +129,6 @@ def _run(
         user_message="do a thing",
         original_user_message="do a thing",
         _should_review_memory=False,
-        _turn_exit_reason=turn_exit_reason,
     )
 
 

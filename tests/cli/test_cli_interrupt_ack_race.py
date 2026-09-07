@@ -307,8 +307,8 @@ def test_chat_multimodal_note_persists_clean_input_once(tmp_path, monkeypatch):
         agent._user_turn_count = 0
         agent._todo_store = types.SimpleNamespace(has_items=lambda: True)
         agent._tool_guardrails = types.SimpleNamespace(reset_for_turn=lambda: None)
-        from agent.tool_guardrails import TurnGuardrailState
-        agent._guardrail_state = TurnGuardrailState()
+        from agent.turn_state import AgentTurnState
+        agent._turn_state = AgentTurnState()
         agent._compression_warning = None
         agent._memory_write_origin = "assistant_tool"
         agent._stream_context_scrubber = None

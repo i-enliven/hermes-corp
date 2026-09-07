@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent.tool_guardrails import TurnGuardrailState
 from agent.turn_finalizer import finalize_turn
+from tests.turn_state_test_helpers import turn_state
 
 
 class _LimitAgent:
@@ -38,7 +38,6 @@ class _LimitAgent:
         self.session_estimated_cost_usd = 0
         self.session_cost_status = "unknown"
         self.session_cost_source = "test"
-        self._guardrail_state = TurnGuardrailState()
         self._interrupt_message = None
         self._response_was_previewed = False
         self._skill_nudge_interval = 0
@@ -99,10 +98,8 @@ def _finalize(
 ):
     return finalize_turn(
         agent,
+    turn_state(api_call_count=api_call_count, interrupted=False, failed=False, turn_exit_reason=exit_reason),
         final_response=final_response,
-        api_call_count=api_call_count,
-        interrupted=False,
-        failed=False,
         messages=[{"role": "user", "content": "task"}],
         conversation_history=[],
         effective_task_id="task",
@@ -110,7 +107,6 @@ def _finalize(
         user_message="task",
         original_user_message="task",
         _should_review_memory=False,
-        _turn_exit_reason=exit_reason,
         _pending_verification_response=pending_verification_response,
     )
 
@@ -145,10 +141,8 @@ def test_pending_response_does_not_mask_later_terminal_exit(
 
     result = finalize_turn(
         agent,
+        turn_state(api_call_count=60, interrupted=interrupted, failed=failed, turn_exit_reason=exit_reason),
         final_response=None,
-        api_call_count=60,
-        interrupted=interrupted,
-        failed=failed,
         messages=[{"role": "user", "content": "task"}],
         conversation_history=[],
         effective_task_id="task",
@@ -156,7 +150,6 @@ def test_pending_response_does_not_mask_later_terminal_exit(
         user_message="task",
         original_user_message="task",
         _should_review_memory=False,
-        _turn_exit_reason=exit_reason,
         _pending_verification_response="stale premature report",
     )
 
@@ -177,10 +170,8 @@ def test_published_pending_candidate_is_not_duplicated_by_finalizer(monkeypatch)
 
     result = finalize_turn(
         agent,
+        turn_state(api_call_count=60, interrupted=False, failed=False, turn_exit_reason="unknown"),
         final_response=report,
-        api_call_count=60,
-        interrupted=False,
-        failed=False,
         # The candidate is already in messages as the tail assistant.
         messages=[
             {"role": "user", "content": "task"},
@@ -192,7 +183,6 @@ def test_published_pending_candidate_is_not_duplicated_by_finalizer(monkeypatch)
         user_message="task",
         original_user_message="task",
         _should_review_memory=False,
-        _turn_exit_reason="unknown",
         _pending_verification_response=report,
     )
 
@@ -213,10 +203,8 @@ def test_iteration_limit_summary_completion_flag(monkeypatch):
 
     result = finalize_turn(
         agent,
+        turn_state(api_call_count=60, interrupted=False, failed=False, turn_exit_reason="budget_exhausted"),
         final_response=None,
-        api_call_count=60,
-        interrupted=False,
-        failed=False,
         messages=[{"role": "user", "content": "task"}],
         conversation_history=[],
         effective_task_id="task",
@@ -224,7 +212,6 @@ def test_iteration_limit_summary_completion_flag(monkeypatch):
         user_message="task",
         original_user_message="task",
         _should_review_memory=False,
-        _turn_exit_reason="budget_exhausted",
     )
 
     assert result["final_response"] == "summary from extra call"
@@ -240,10 +227,8 @@ def test_iteration_limit_summary_failure_completed_flag(monkeypatch):
 
     result = finalize_turn(
         agent,
+        turn_state(api_call_count=60, interrupted=False, failed=False, turn_exit_reason="budget_exhausted"),
         final_response=None,
-        api_call_count=60,
-        interrupted=False,
-        failed=False,
         messages=[{"role": "user", "content": "task"}],
         conversation_history=[],
         effective_task_id="task",
@@ -251,7 +236,6 @@ def test_iteration_limit_summary_failure_completed_flag(monkeypatch):
         user_message="task",
         original_user_message="task",
         _should_review_memory=False,
-        _turn_exit_reason="budget_exhausted",
     )
 
     assert result["completed"] is False

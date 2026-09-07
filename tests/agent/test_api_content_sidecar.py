@@ -30,7 +30,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from agent.memory_manager import build_memory_context_block
-from agent.tool_guardrails import TurnGuardrailState
+from agent.turn_state import AgentTurnState
 from agent.turn_context import build_turn_context, compose_user_api_content
 from hermes_state import SessionDB
 
@@ -187,7 +187,7 @@ class _FakeAgent:
         self._tool_guardrails = _FakeGuardrails()
         # Real value object: the prologue reads the owed resumption handoff
         # through it, so the fake must carry the genuine article.
-        self._guardrail_state = TurnGuardrailState()
+        self._turn_state = AgentTurnState()
         self._compression_warning = None
         self._interrupt_requested = False
         self._memory_write_origin = "assistant_tool"

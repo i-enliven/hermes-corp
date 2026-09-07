@@ -47,6 +47,7 @@ from agent.model_metadata import (
     estimate_messages_tokens_rough,
     estimate_request_tokens_rough,
 )
+from agent.turn_state import AgentTurnState
 
 logger = logging.getLogger(__name__)
 
@@ -165,7 +166,7 @@ def consume_guardrail_resumption_note(agent: Any) -> str:
     Delivered on the user message via the api_content sidecar to maintain
     byte-stable prefix caching and strict role alternation.
     """
-    halt_decision = agent._guardrail_state.take_pending_resumption()
+    halt_decision = agent._turn_state.guardrails.take_pending_resumption()
     if halt_decision is None:
         return ""
     return halt_decision.resumption_note()
@@ -600,7 +601,10 @@ def build_turn_context(
     agent._mute_post_response = False
     agent._unicode_sanitization_passes = 0
     agent._tool_guardrails.reset_for_turn()
-    agent._guardrail_state.begin_turn()
+    # The turn boundary, in one place: a fresh turn state, carrying forward only
+    # the resumption note still owed to the model. Everything the previous turn
+    # believed about what stopped it dies here.
+    agent._turn_state = AgentTurnState.begin_turn(getattr(agent, "_turn_state", None))
     _reset_consol = getattr(agent._memory_store, "reset_consolidation_failures", None)
     if callable(_reset_consol):
         _reset_consol()

@@ -46,8 +46,8 @@ from agent.think_scrubber import StreamingThinkScrubber
 from agent.tool_guardrails import (
     ToolCallGuardrailConfig,
     ToolCallGuardrailController,
-    TurnGuardrailState,
 )
+from agent.turn_state import AgentTurnState
 from hermes_cli.config import cfg_get
 from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.timeouts import get_provider_request_timeout
@@ -844,9 +844,11 @@ def init_agent(
     # even when stream consumers are registered (no tokens streaming then)
     agent._executing_tools = False
     agent._tool_guardrails = ToolCallGuardrailController()
-    # The one home of this turn's guardrail facts: what stopped it, and whether
-    # a resumption note is still owed to the model.
-    agent._guardrail_state = TurnGuardrailState()
+    # The one home of everything true only for the current turn: what stopped it,
+    # whether a resumption note is still owed to the model, and the tallies the
+    # turn result reports. Replaced wholesale at the per-turn reset in the
+    # prologue, which is what makes the turn boundary a single event.
+    agent._turn_state = AgentTurnState()
     # Interrupt mechanism for breaking out of tool loops
     agent._interrupt_requested = False
     agent._interrupt_message = None  # Optional message that triggered interrupt
@@ -984,7 +986,8 @@ def init_agent(
     # Rate-limit durable SessionDB activity stamps from _touch_activity (#72016).
     agent._session_activity_last_persist_mono: float = 0.0
     agent._current_tool: str | None = None
-    agent._api_call_count: int = 0
+    # ``_api_call_count`` is not stored here: it is the turn state's, read through
+    # a property on AIAgent so the surfaces that report it see one fact.
     # Opt-out flag for the between-turns MCP tool refresh (build_turn_context).
     # Set on internal forks (e.g. background_review) that must keep ``tools[]``
     # byte-identical to a parent for provider cache parity.

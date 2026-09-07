@@ -4715,6 +4715,21 @@ class AIAgent:
         """Check if an interrupt has been requested."""
         return self._interrupt_requested
 
+    @property
+    def _api_call_count(self) -> int:
+        """How many provider calls the current turn has spent.
+
+        Read through to the turn state, which holds the one copy. The loop
+        increments it; the session-activity payload and the TUI/ACP "has the
+        user spoken yet" probes report it. A second attribute here would be a
+        second fact that can drift from the one being counted.
+        """
+        return self._turn_state.api_call_count
+
+    @_api_call_count.setter
+    def _api_call_count(self, value: int) -> None:
+        self._turn_state.api_call_count = value
+
 
 
 
@@ -8131,11 +8146,11 @@ class AIAgent:
         if decision.action in {"warn", "halt"}:
             function_result = append_toolguard_guidance(function_result, decision)
         if decision.should_halt:
-            self._guardrail_state.record_halt(decision)
+            self._turn_state.guardrails.record_halt(decision)
         return function_result
 
     def _guardrail_block_result(self, decision: ToolGuardrailDecision) -> str:
-        self._guardrail_state.record_halt(decision)
+        self._turn_state.guardrails.record_halt(decision)
         return decision.synthetic_tool_result()
 
     def _execute_tool_calls(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:

@@ -1794,11 +1794,12 @@ def run_conversation(
     # turn's flush must not be reported against this turn.
     agent._compression_adoption_failed = False
 
-    # Main conversation loop counters (pure locals consumed by the loop below).
-    api_call_count = 0
+    # The turn's working facts, all of them. Built at the per-turn reset in the
+    # prologue above, so this is the one place the turn's state is taken up; the
+    # loop below and the finalizer both read it through this binding rather than
+    # carrying separate locals that the finalizer then has to be handed by name.
+    turn = agent._turn_state
     final_response = None
-    interrupted = False
-    failed = False
     codex_ack_continuations = 0
     length_continue_retries = 0
     truncated_tool_call_retries = 0
@@ -1816,7 +1817,6 @@ def run_conversation(
     max_compression_attempts = getattr(agent, "max_compression_attempts", 3)
     _last_preflight_pressure: Optional[int] = None
     _preflight_compression_blocked = _ctx.preflight_compression_blocked
-    _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
     # Last composed answer intentionally held back by a verification gate. If
     # that continuation consumes the remaining budget, this is the best
     # user-facing result available; it must not be confused with error or
@@ -1861,7 +1861,7 @@ def run_conversation(
             should_review_memory=_should_review_memory,
         )
 
-    while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
+    while (turn.api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
         _redirect_text = agent._drain_pending_redirect()
         if _redirect_text:
             _apply_active_turn_redirect(agent, messages, _redirect_text)
@@ -1877,15 +1877,14 @@ def run_conversation(
 
         # Check for interrupt request (e.g., user sent new message)
         if agent._interrupt_requested:
-            interrupted = True
-            _turn_exit_reason = "interrupted_by_user"
+            turn.interrupted = True
+            turn.turn_exit_reason = "interrupted_by_user"
             if not agent.quiet_mode:
                 agent._safe_print("\n⚡ Breaking out of tool loop due to interrupt...")
             break
         
-        api_call_count += 1
-        agent._api_call_count = api_call_count
-        agent._touch_activity(f"starting API call #{api_call_count}")
+        turn.api_call_count += 1
+        agent._touch_activity(f"starting API call #{turn.api_call_count}")
 
         # Grace call: the budget is exhausted but we gave the model one
         # more chance.  Consume the grace flag so the loop exits after
@@ -1893,7 +1892,7 @@ def run_conversation(
         if agent._budget_grace_call:
             agent._budget_grace_call = False
         elif not agent.iteration_budget.consume():
-            _turn_exit_reason = "budget_exhausted"
+            turn.turn_exit_reason = "budget_exhausted"
             if not agent.quiet_mode:
                 agent._safe_print(f"\n⚠️  Iteration budget exhausted ({agent.iteration_budget.used}/{agent.iteration_budget.max_total} iterations used)")
             break
@@ -1922,9 +1921,9 @@ def run_conversation(
                             if isinstance(tc, dict)
                         ]
                         break
-                agent.step_callback(api_call_count, prev_tools)
+                agent.step_callback(turn.api_call_count, prev_tools)
             except Exception as _step_err:
-                logger.debug("step_callback error (iteration %s): %s", api_call_count, _step_err)
+                logger.debug("step_callback error (iteration %s): %s", turn.api_call_count, _step_err)
 
         # Track tool-calling iterations for skill nudge.
         # Counter resets whenever skill_manage is actually used.
@@ -2409,12 +2408,11 @@ def run_conversation(
         )
         if _runtime_context_error:
             final_response = _runtime_context_error
-            failed = True
-            _turn_exit_reason = "ollama_runtime_context_too_small"
+            turn.failed = True
+            turn.turn_exit_reason = "ollama_runtime_context_too_small"
             append_message(messages, {"role": "assistant", "content": final_response})
             agent._emit_status("❌ Ollama runtime context is too small for Hermes tool use")
-            api_call_count -= 1
-            agent._api_call_count = api_call_count
+            turn.api_call_count -= 1
             try:
                 agent.iteration_budget.refund()
             except Exception:
@@ -2577,8 +2575,7 @@ def run_conversation(
                 # iteration-budget unit for the agent's lifetime and
                 # finalize_turn logged an api_call_count including a call that
                 # was never made.
-                api_call_count -= 1
-                agent._api_call_count = api_call_count
+                turn.api_call_count -= 1
                 agent.iteration_budget.refund()
                 if _should_skip_model_call_for_reference_handoff(
                     messages, user_message
@@ -2591,7 +2588,7 @@ def run_conversation(
                     )
                     if not final_response:
                         final_response = _HANDOFF_SKIP_FINAL_RESPONSE
-                    _turn_exit_reason = "compaction_handoff_not_actionable"
+                    turn.turn_exit_reason = "compaction_handoff_not_actionable"
                     break
                 continue
         elif (
@@ -2625,7 +2622,7 @@ def run_conversation(
         thinking_spinner = None
         
         if not agent.quiet_mode:
-            agent._vprint(f"\n{agent.log_prefix}🔄 Making API call #{api_call_count}/{agent.max_iterations}...")
+            agent._vprint(f"\n{agent.log_prefix}🔄 Making API call #{turn.api_call_count}/{agent.max_iterations}...")
             agent._vprint(f"{agent.log_prefix}   📊 Request size: {len(api_messages)} messages, ~{approx_tokens:,} tokens (~{total_chars:,} chars)")
             agent._vprint(f"{agent.log_prefix}   🔧 Available tools: {len(agent.tools) if agent.tools else 0}")
         else:
@@ -2657,7 +2654,7 @@ def run_conversation(
         finish_reason = "stop"
         response = None  # Guard against UnboundLocalError if all retries fail
         api_kwargs = None  # Guard against UnboundLocalError in except handler
-        api_request_id = f"{turn_id}:api:{api_call_count}"
+        api_request_id = f"{turn_id}:api:{turn.api_call_count}"
         agent._current_api_request_id = api_request_id
 
         while retry_count < max_retries:
@@ -2702,7 +2699,7 @@ def run_conversation(
                                 "fallback provider in config.yaml."
                             ),
                             "messages": messages,
-                            "api_calls": api_call_count,
+                            "api_calls": turn.api_call_count,
                             "completed": False,
                             "failed": True,
                             "error": _nous_msg,
@@ -2783,7 +2780,7 @@ def run_conversation(
                         provider=agent.provider,
                         base_url=agent.base_url,
                         api_mode=agent.api_mode,
-                        api_call_count=api_call_count,
+                        api_call_count=turn.api_call_count,
                     )
                     api_kwargs = _llm_request_mw.payload
                     _original_api_kwargs = _llm_request_mw.original_payload
@@ -2840,7 +2837,7 @@ def run_conversation(
                             provider=agent.provider,
                             base_url=agent.base_url,
                             api_mode=agent.api_mode,
-                            api_call_count=api_call_count,
+                            api_call_count=turn.api_call_count,
                             retry_count=retry_count,
                             request_messages=list(request_messages)
                             if isinstance(request_messages, list)
@@ -2998,7 +2995,7 @@ def run_conversation(
                         provider=agent.provider,
                         base_url=agent.base_url,
                         api_mode=agent.api_mode,
-                        api_call_count=api_call_count,
+                        api_call_count=turn.api_call_count,
                         middleware_trace=list(_llm_middleware_trace),
                     )
                 finally:
@@ -3026,7 +3023,7 @@ def run_conversation(
                     if agent.clear_interrupt(preserve_redirect=True):
                         _retry.restart_with_redirected_messages = True
                     else:
-                        interrupted = True
+                        turn.interrupted = True
                     break
                 
                 api_duration = time.time() - api_start_time
@@ -3132,7 +3129,7 @@ def run_conversation(
                         task_id=effective_task_id,
                         turn_id=turn_id,
                         api_request_id=api_request_id,
-                        api_call_count=api_call_count,
+                        api_call_count=turn.api_call_count,
                         api_start_time=api_start_time,
                         api_kwargs=api_kwargs,
                         error_type="InvalidAPIResponse",
@@ -3252,7 +3249,7 @@ def run_conversation(
                             "final_response": _final_response,
                             "messages": messages,
                             "completed": False,
-                            "api_calls": api_call_count,
+                            "api_calls": turn.api_call_count,
                             "error": _final_response,
                             "failed": True  # Mark as failure for filtering
                         }
@@ -3286,7 +3283,7 @@ def run_conversation(
                             return {
                                 "final_response": _interrupt_text,
                                 "messages": messages,
-                                "api_calls": api_call_count,
+                                "api_calls": turn.api_call_count,
                                 "completed": False,
                                 "interrupted": True,
                             }
@@ -3387,7 +3384,7 @@ def run_conversation(
                         task_id=effective_task_id,
                         turn_id=turn_id,
                         api_request_id=api_request_id,
-                        api_call_count=api_call_count,
+                        api_call_count=turn.api_call_count,
                         api_start_time=api_start_time,
                         api_kwargs=api_kwargs,
                         error_type="ContentPolicyBlocked",
@@ -3453,7 +3450,7 @@ def run_conversation(
                     agent._persist_session(messages, conversation_history)
                     return _content_policy_blocked_result(
                         messages,
-                        api_call_count,
+                        turn.api_call_count,
                         final_response=_refusal_response,
                         error_detail=_refusal_text or "model declined (content_filter)",
                     )
@@ -3547,7 +3544,7 @@ def run_conversation(
                         return {
                             "final_response": _exhaust_response,
                             "messages": messages,
-                            "api_calls": api_call_count,
+                            "api_calls": turn.api_call_count,
                             "completed": False,
                             "partial": True,
                             "error": _exhaust_error,
@@ -3601,7 +3598,7 @@ def run_conversation(
                         return {
                             "final_response": _rep_response,
                             "messages": messages,
-                            "api_calls": api_call_count,
+                            "api_calls": turn.api_call_count,
                             "completed": False,
                             "partial": True,
                             "error": _rep_error,
@@ -3768,7 +3765,7 @@ def run_conversation(
                             return {
                                 "final_response": partial_response or None,
                                 "messages": messages,
-                                "api_calls": api_call_count,
+                                "api_calls": turn.api_call_count,
                                 "completed": False,
                                 "partial": True,
                                 "error": "Response remained truncated after 4 continuation attempts",
@@ -3838,7 +3835,7 @@ def run_conversation(
                             return {
                                 "final_response": _final_response,
                                 "messages": messages,
-                                "api_calls": api_call_count,
+                                "api_calls": turn.api_call_count,
                                 "completed": False,
                                 "partial": True,
                                 "error": _final_response,
@@ -3855,7 +3852,7 @@ def run_conversation(
                         return {
                             "final_response": "Response truncated due to output length limit",
                             "messages": rolled_back_messages,
-                            "api_calls": api_call_count,
+                            "api_calls": turn.api_call_count,
                             "completed": False,
                             "partial": True,
                             "error": "Response truncated due to output length limit"
@@ -3868,7 +3865,7 @@ def run_conversation(
                         return {
                             "final_response": "First response truncated due to output length limit",
                             "messages": messages,
-                            "api_calls": api_call_count,
+                            "api_calls": turn.api_call_count,
                             "completed": False,
                             "failed": True,
                             "error": "First response truncated due to output length limit"
@@ -4174,7 +4171,7 @@ def run_conversation(
                     api_request_id,
                     outcome="success",
                 )
-                agent._touch_activity(f"API call #{api_call_count} completed")
+                agent._touch_activity(f"API call #{turn.api_call_count} completed")
                 break  # Success, exit retry loop
 
             except InterruptedError:
@@ -4194,7 +4191,7 @@ def run_conversation(
                         break
                 api_elapsed = time.time() - api_start_time
                 agent._vprint(f"{agent.log_prefix}⚡ Interrupted during API call.", force=True)
-                interrupted = True
+                turn.interrupted = True
                 # Preserve any assistant text already streamed to the user
                 # before the stop landed. Dropping it leaves history with no
                 # record of the half-finished reply on screen, so the next turn
@@ -4526,7 +4523,7 @@ def run_conversation(
                     task_id=effective_task_id,
                     turn_id=turn_id,
                     api_request_id=api_request_id,
-                    api_call_count=api_call_count,
+                    api_call_count=turn.api_call_count,
                     api_start_time=api_start_time,
                     api_kwargs=api_kwargs,
                     error_type=type(api_error).__name__,
@@ -5011,7 +5008,7 @@ def run_conversation(
                     return {
                         "final_response": _interrupt_text,
                         "messages": messages,
-                        "api_calls": api_call_count,
+                        "api_calls": turn.api_call_count,
                         "completed": False,
                         "interrupted": True,
                     }
@@ -5081,7 +5078,7 @@ def run_conversation(
                         "final_response": _final_response,
                         "messages": messages,
                         "completed": False,
-                        "api_calls": api_call_count,
+                        "api_calls": turn.api_call_count,
                         "error": _final_response,
                         "partial": True,
                         "failed": True,
@@ -5384,7 +5381,7 @@ def run_conversation(
                             "final_response": _final_response,
                             "messages": messages,
                             "completed": False,
-                            "api_calls": api_call_count,
+                            "api_calls": turn.api_call_count,
                             "error": _final_response,
                             "partial": True,
                             "failed": True,
@@ -5412,7 +5409,7 @@ def run_conversation(
                         compression_attempts -= 1
                         agent._persist_session(messages, conversation_history)
                         return _compression_deferred_result(
-                            agent, messages, api_call_count
+                            agent, messages, turn.api_call_count
                         )
                     conversation_history = conversation_history_after_compression(
                         agent, messages, conversation_history
@@ -5456,7 +5453,7 @@ def run_conversation(
                             "final_response": _final_response,
                             "messages": messages,
                             "completed": False,
-                            "api_calls": api_call_count,
+                            "api_calls": turn.api_call_count,
                             "error": _final_response,
                             "partial": True,
                             "failed": True,
@@ -5529,7 +5526,7 @@ def run_conversation(
                                 "final_response": _final_response,
                                 "messages": messages,
                                 "completed": False,
-                                "api_calls": api_call_count,
+                                "api_calls": turn.api_call_count,
                                 "error": _final_response,
                                 "partial": True,
                                 "failed": True,
@@ -5553,7 +5550,7 @@ def run_conversation(
                                 compression_attempts -= 1
                                 agent._persist_session(messages, conversation_history)
                                 return _compression_deferred_result(
-                                    agent, messages, api_call_count
+                                    agent, messages, turn.api_call_count
                                 )
                             conversation_history = conversation_history_after_compression(
                                 agent, messages, conversation_history
@@ -5608,7 +5605,7 @@ def run_conversation(
                             "final_response": _final_response,
                             "messages": messages,
                             "completed": False,
-                            "api_calls": api_call_count,
+                            "api_calls": turn.api_call_count,
                             "error": _final_response,
                             "partial": True,
                             "failed": True,
@@ -5683,7 +5680,7 @@ def run_conversation(
                             "final_response": _final_response,
                             "messages": messages,
                             "completed": False,
-                            "api_calls": api_call_count,
+                            "api_calls": turn.api_call_count,
                             "error": _final_response,
                             "partial": True,
                             "failed": True,
@@ -5713,7 +5710,7 @@ def run_conversation(
                         compression_attempts -= 1
                         agent._persist_session(messages, conversation_history)
                         return _compression_deferred_result(
-                            agent, messages, api_call_count
+                            agent, messages, turn.api_call_count
                         )
                     conversation_history = conversation_history_after_compression(
                         agent, messages, conversation_history
@@ -5746,7 +5743,7 @@ def run_conversation(
                             "final_response": _final_response,
                             "messages": messages,
                             "completed": False,
-                            "api_calls": api_call_count,
+                            "api_calls": turn.api_call_count,
                             "error": _final_response,
                             "partial": True,
                             "failed": True,
@@ -6030,7 +6027,7 @@ def run_conversation(
                         )
                         return _content_policy_blocked_result(
                             messages,
-                            api_call_count,
+                            turn.api_call_count,
                             final_response=_policy_response,
                             error_detail=_nonretryable_summary,
                         )
@@ -6043,7 +6040,7 @@ def run_conversation(
                             classified=classified,
                             summary=_nonretryable_summary,
                             messages=messages,
-                            api_call_count=api_call_count,
+                            api_call_count=turn.api_call_count,
                             provider=_provider,
                             base_url=_base,
                             model=_model,
@@ -6051,7 +6048,7 @@ def run_conversation(
                     return {
                         "final_response": _nonretryable_summary,
                         "messages": messages,
-                        "api_calls": api_call_count,
+                        "api_calls": turn.api_call_count,
                         "completed": False,
                         "failed": True,
                         "error": _nonretryable_summary,
@@ -6262,7 +6259,7 @@ def run_conversation(
                     return {
                         "final_response": _final_response,
                         "messages": messages,
-                        "api_calls": api_call_count,
+                        "api_calls": turn.api_call_count,
                         "completed": False,
                         "failed": True,
                         "error": _final_summary,
@@ -6352,7 +6349,7 @@ def run_conversation(
                         return {
                             "final_response": _interrupt_text,
                             "messages": messages,
-                            "api_calls": api_call_count,
+                            "api_calls": turn.api_call_count,
                             "completed": False,
                             "interrupted": True,
                         }
@@ -6375,18 +6372,18 @@ def run_conversation(
             # The cancelled request produced no valid assistant item. Reuse the
             # same logical iteration after the outer loop appends the displayed
             # partial context and correction to ``messages``.
-            api_call_count -= 1
+            turn.api_call_count -= 1
             agent.iteration_budget.refund()
             _retry.restart_with_redirected_messages = False
             continue
 
         # If the API call was interrupted, skip response processing
-        if interrupted:
-            _turn_exit_reason = "interrupted_during_api_call"
+        if turn.interrupted:
+            turn.turn_exit_reason = "interrupted_during_api_call"
             break
 
         if _retry.restart_with_compressed_messages:
-            api_call_count -= 1
+            turn.api_call_count -= 1
             agent.iteration_budget.refund()
             # Count compression restarts toward the retry limit to prevent
             # infinite loops when compression reduces messages but not enough
@@ -6402,7 +6399,7 @@ def run_conversation(
                 )
                 if not final_response:
                     final_response = _HANDOFF_SKIP_FINAL_RESPONSE
-                _turn_exit_reason = "compaction_handoff_not_actionable"
+                turn.turn_exit_reason = "compaction_handoff_not_actionable"
                 break
             # In-loop compression rebuilt `messages` with fresh compaction
             # copies, so the pre-compression current-turn index is stale.
@@ -6425,7 +6422,7 @@ def run_conversation(
             # flag and break here).  Re-issue the API call against the
             # now-active fallback provider.  Refund the budget/count for the
             # stalled attempt so the fallback gets a fair turn.
-            api_call_count -= 1
+            turn.api_call_count -= 1
             agent.iteration_budget.refund()
             _retry.restart_with_rebuilt_messages = False
             # Failover shrank the compressor's context window to the
@@ -6457,7 +6454,7 @@ def run_conversation(
         # (e.g. repeated context-length errors that exhausted retry_count),
         # the `response` variable is still None. Break out cleanly.
         if response is None:
-            _turn_exit_reason = "all_retries_exhausted_no_response"
+            turn.turn_exit_reason = "all_retries_exhausted_no_response"
             print(f"{agent.log_prefix}❌ All API retries exhausted with no successful response.")
             agent._persist_session(messages, conversation_history)
             break
@@ -6514,7 +6511,7 @@ def run_conversation(
                         provider=agent.provider,
                         base_url=agent.base_url,
                         api_mode=agent.api_mode,
-                        api_call_count=api_call_count,
+                        api_call_count=turn.api_call_count,
                         api_duration=api_duration,
                         started_at=api_start_time,
                         ended_at=_api_ended_at,
@@ -6588,7 +6585,7 @@ def run_conversation(
                     return {
                         "final_response": "Incomplete REASONING_SCRATCHPAD after 2 retries",
                         "messages": rolled_back_messages,
-                        "api_calls": api_call_count,
+                        "api_calls": turn.api_call_count,
                         "completed": False,
                         "partial": True,
                         "error": "Incomplete REASONING_SCRATCHPAD after 2 retries"
@@ -6730,7 +6727,7 @@ def run_conversation(
                 return {
                     "final_response": "Codex response remained incomplete after 3 continuation attempts",
                     "messages": messages,
-                    "api_calls": api_call_count,
+                    "api_calls": turn.api_call_count,
                     "completed": False,
                     "partial": True,
                     "error": "Codex response remained incomplete after 3 continuation attempts",
@@ -6819,7 +6816,7 @@ def run_conversation(
                         return {
                             "final_response": _final_response,
                             "messages": messages,
-                            "api_calls": api_call_count,
+                            "api_calls": turn.api_call_count,
                             "completed": False,
                             "partial": True,
                             "error": _final_response
@@ -6903,7 +6900,7 @@ def run_conversation(
                         return {
                             "final_response": _final_response,
                             "messages": messages,
-                            "api_calls": api_call_count,
+                            "api_calls": turn.api_call_count,
                             "completed": False,
                             "partial": True,
                             "error": _final_response,
@@ -7133,9 +7130,9 @@ def run_conversation(
                     # nothing was recorded, the cause is genuinely unknown.
                     if getattr(agent, "_last_persistence_error_cause", None) is None:
                         agent._last_persistence_error_cause = "unknown"
-                    _turn_exit_reason = "session_persistence_failed"
+                    turn.turn_exit_reason = "session_persistence_failed"
                     final_response = ""
-                    failed = True
+                    turn.failed = True
                     break
 
                 # A UI must never observe an assistant/tool-call row that is
@@ -7156,20 +7153,20 @@ def run_conversation(
                     except Exception:
                         pass
 
-                agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
+                agent._execute_tool_calls(assistant_message, messages, effective_task_id, turn.api_call_count)
 
                 if getattr(agent, "_incremental_persistence_failed", False):
                     # A tool result could not be made canonical. Do not send
                     # the in-memory result back to the model or project any
                     # later events from this turn.
-                    _turn_exit_reason = "session_persistence_failed"
+                    turn.turn_exit_reason = "session_persistence_failed"
                     final_response = ""
-                    failed = True
+                    turn.failed = True
                     break
 
-                decision = agent._guardrail_state.halt_decision
+                decision = turn.guardrails.halt_decision
                 if decision is not None:
-                    _turn_exit_reason = "guardrail_halt"
+                    turn.turn_exit_reason = "guardrail_halt"
                     final_response = decision.halt_prose()
                     agent._emit_status(decision.status_line())
                     append_message(messages, {"role": "assistant", "content": final_response})
@@ -7294,7 +7291,7 @@ def run_conversation(
                             )
                             if not final_response:
                                 final_response = _HANDOFF_SKIP_FINAL_RESPONSE
-                            _turn_exit_reason = "compaction_handoff_not_actionable"
+                            turn.turn_exit_reason = "compaction_handoff_not_actionable"
                             break
                 elif agent.compression_enabled:
                     # Over threshold but compression is blocked (summary-LLM
@@ -7369,7 +7366,7 @@ def run_conversation(
                 # timeout (HERMES_AGENT_TIMEOUT, default 1800s) and the
                 # gateway kills the session before the next activity
                 # touch fires (#69559, #69131).
-                agent._touch_activity(f"tool results posted, continuing iteration #{api_call_count}")
+                agent._touch_activity(f"tool results posted, continuing iteration #{turn.api_call_count}")
                 # Continue loop for next response
                 continue
             
@@ -7399,7 +7396,7 @@ def run_conversation(
                         getattr(agent, "_current_streamed_assistant_text", "") or ""
                     )
                     if agent._has_content_after_think_block(_partial_streamed):
-                        _turn_exit_reason = "partial_stream_recovery"
+                        turn.turn_exit_reason = "partial_stream_recovery"
                         _recovered = agent._strip_think_blocks(_partial_streamed).strip()
                         logger.info(
                             "Partial stream content delivered (%d chars) "
@@ -7430,7 +7427,7 @@ def run_conversation(
                     # post-tool nudge below handle that instead of exiting early.
                     fallback = getattr(agent, '_last_content_with_tools', None)
                     if fallback and getattr(agent, '_last_content_tools_all_housekeeping', False):
-                        _turn_exit_reason = "fallback_prior_turn_content"
+                        turn.turn_exit_reason = "fallback_prior_turn_content"
                         logger.info("Empty follow-up after tool calls — using prior turn content as final response")
                         agent._emit_status("↻ Empty response after tool calls — using earlier content as final answer")
                         agent._last_content_with_tools = None
@@ -7625,7 +7622,7 @@ def run_conversation(
                                 return {
                                     "final_response": _interrupt_text,
                                     "messages": messages,
-                                    "api_calls": api_call_count,
+                                    "api_calls": turn.api_call_count,
                                     "completed": False,
                                     "interrupted": True,
                                 }
@@ -7710,7 +7707,7 @@ def run_conversation(
                             f"per attempt even when no answer is produced)"
                         )
                     agent._flush_status_buffer()
-                    _turn_exit_reason = "empty_response_exhausted"
+                    turn.turn_exit_reason = "empty_response_exhausted"
                     reasoning_text = agent._extract_reasoning(assistant_message)
                     agent._drop_trailing_empty_response_scaffolding(messages)
                     assistant_msg = agent._build_assistant_message(assistant_message, finish_reason)
@@ -8092,9 +8089,9 @@ def run_conversation(
                         exc_info=True,
                     )
 
-                _turn_exit_reason = f"text_response(finish_reason={finish_reason})"
+                turn.turn_exit_reason = f"text_response(finish_reason={finish_reason})"
                 if not agent.quiet_mode:
-                    agent._safe_print(f"🎉 Conversation completed after {api_call_count} OpenAI-compatible API call(s)")
+                    agent._safe_print(f"🎉 Conversation completed after {turn.api_call_count} OpenAI-compatible API call(s)")
                 break
             
         except Exception as e:
@@ -8124,10 +8121,10 @@ def run_conversation(
             if _is_local_processing_error:
                 error_msg = (
                     f"Error during local message processing after "
-                    f"OpenAI-compatible API call #{api_call_count}: {str(e)}"
+                    f"OpenAI-compatible API call #{turn.api_call_count}: {str(e)}"
                 )
             else:
-                error_msg = f"Error during OpenAI-compatible API call #{api_call_count}: {str(e)}"
+                error_msg = f"Error during OpenAI-compatible API call #{turn.api_call_count}: {str(e)}"
             try:
                 print(f"❌ {error_msg}")
             except (OSError, ValueError):
@@ -8139,7 +8136,7 @@ def run_conversation(
             # — users would see a one-line summary on screen with no way to
             # recover the call site.  logger.exception() includes the
             # traceback automatically and emits at ERROR.
-            logger.exception("Outer loop error in API call #%d", api_call_count)
+            logger.exception("Outer loop error in API call #%d", turn.api_call_count)
             
             # If an assistant message with tool_calls was already appended,
             # the API expects a role="tool" result for every tool_call_id.
@@ -8179,13 +8176,13 @@ def run_conversation(
             # rather than retrying until the budget is exhausted.
             if (
                 _is_local_processing_error
-                or api_call_count >= agent.max_iterations - 1
+                or turn.api_call_count >= agent.max_iterations - 1
             ):
                 if _is_local_processing_error:
-                    _turn_exit_reason = f"local_processing_error({error_msg[:80]})"
+                    turn.turn_exit_reason = f"local_processing_error({error_msg[:80]})"
                     final_response = f"I apologize, but I encountered an error while processing the model response: {error_msg}"
                 else:
-                    _turn_exit_reason = f"error_near_max_iterations({error_msg[:80]})"
+                    turn.turn_exit_reason = f"error_near_max_iterations({error_msg[:80]})"
                     final_response = f"I apologize, but I encountered repeated errors: {error_msg}"
                 # Append as assistant so the history stays valid for
                 # session resume (avoids consecutive user messages).
@@ -8197,10 +8194,8 @@ def run_conversation(
     # result dict is returned exactly as before.
     return finalize_turn(
         agent,
+        turn,
         final_response=final_response,
-        api_call_count=api_call_count,
-        interrupted=interrupted,
-        failed=failed,
         messages=messages,
         conversation_history=conversation_history,
         effective_task_id=effective_task_id,
@@ -8208,7 +8203,6 @@ def run_conversation(
         user_message=user_message,
         original_user_message=original_user_message,
         _should_review_memory=_should_review_memory,
-        _turn_exit_reason=_turn_exit_reason,
         _pending_verification_response=_pending_verification_response,
         _pending_verification_response_previewed=_pending_verification_response_previewed,
     )
