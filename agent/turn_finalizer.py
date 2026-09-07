@@ -740,12 +740,6 @@ def finalize_turn(
     if halt_decision is not None:
         result["guardrail"] = halt_decision.to_metadata()
         guardrail_state.arm_resumption(halt_decision)
-    # A note consumed by this turn's prologue is a fact about this turn, so it is
-    # reported here even on a turn that did not itself halt: "did the model get
-    # told to change strategy?" is a question callers can now ask of the result
-    # instead of infer it from the halt prose surviving in the transcript.
-    if guardrail_state.resumption_delivered is not None:
-        result.setdefault("guardrail", {})["resumption_delivered"] = True
     # Persistence failures already set failed=True + an explanation in
     # final_response; also stamp `error` so gateway surfaces status="error"
     # (and desktop can toast the cause) instead of a quiet complete frame.

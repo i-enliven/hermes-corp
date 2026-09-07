@@ -43,7 +43,9 @@ turn that raised it.
 _Avoid_: flag, marker, state
 
 **Resumption handoff**:
-The transfer of a halt record to the turn following the halt.
+The transfer of a halt decision to the turn following the halt. It is held in memory
+for the duration of one turn boundary; the durable halt record is what carries the same
+fact across a process boundary.
 _Avoid_: pending, carry-over, smuggle
 
 **Resumption note**:
@@ -56,6 +58,6 @@ blocker, then ask or propose before acting again.
 _Avoid_: pivot, recovery
 
 **Turn guardrail state**:
-The guardrail half of the turn state: the halt decision and any pending resumption
-handoff for one turn.
+The guardrail half of the turn state: what stopped the current turn, whether a
+resumption note is still owed to the model, and whether one was delivered.
 _Avoid_: context, session state

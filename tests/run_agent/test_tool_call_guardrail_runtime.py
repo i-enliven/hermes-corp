@@ -722,6 +722,12 @@ def test_turn_resumption_after_guardrail_halt_injects_strategy_shift():
     last_user_content = user_msgs[-1].get("content", "")
     assert "MANDATORY STRATEGY SHIFT: Do NOT immediately emit another inspection or tool call." in last_user_content
     assert "summarize what you have learned so far" in last_user_content
-    # The turn that received the note reports that it delivered one, so the
-    # handoff's whole journey is observable from the two results alone.
-    assert result2["guardrail"]["resumption_delivered"] is True
+    # The key means "this turn halted", full stop. A turn that merely delivered a
+    # note from the turn before it must not carry one, or the same key would mean
+    # two different things and a reader could not tell a halt from a delivery.
+    assert "guardrail" not in result2
+    # The turn that received the note records the delivery on the one object that
+    # holds the guardrail facts, so the handoff's whole journey is observable: the
+    # halted turn armed it, this turn spent it.
+    assert agent._guardrail_state.resumption_delivered is not None
+    assert agent._guardrail_state.pending_resumption is None
