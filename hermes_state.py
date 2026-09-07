@@ -6841,6 +6841,93 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             last_activity_provenance=row.get("last_activity_provenance"),
         )
 
+    def write_guardrail_halt_record(
+        self, session_id: str, record: Dict[str, Any]
+    ) -> bool:
+        """Store the account of a guardrail halt so the next turn can read it.
+
+        Keyed by session, which is what keeps one session's halt from surfacing
+        in another -- and keeps two firings of the same scheduled job apart,
+        since each firing mints its own session.
+
+        Returns whether a row was actually written. An UPDATE against a session
+        that has no row yet matches nothing and raises nothing, so without this
+        the loss would be invisible: the caller would believe the nudge was saved
+        and the next turn would arrive with none.
+
+        Raises whatever the write raises. The caller decides what a failure
+        costs; a halt record is a nudge, so losing one must not cost a turn.
+        """
+        if not session_id:
+            return False
+
+        def _do(conn):
+            cur = conn.execute(
+                "UPDATE sessions SET guardrail_halt_record = ? WHERE id = ?",
+                (json.dumps(record, sort_keys=True, ensure_ascii=False), session_id),
+            )
+            return cur.rowcount > 0
+
+        return bool(self._execute_write(_do))
+
+    def read_guardrail_halt_record(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Return the stored halt account for *session_id*, or None.
+
+        None means "no halt is owed to this session", which is also the answer
+        for a session that predates the column -- both read as nothing owed, and
+        neither is an error.
+        """
+        if not session_id:
+            return None
+        with self._read_ctx() as conn:
+            try:
+                row = conn.execute(
+                    "SELECT guardrail_halt_record FROM sessions WHERE id = ?",
+                    (session_id,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                # A store opened before the column arrived, or a read-only
+                # handle against one. Nothing is owed; say so quietly.
+                return None
+        if not row or not row[0]:
+            return None
+        try:
+            decoded = json.loads(row[0])
+        except (ValueError, TypeError):
+            return None
+        return decoded if isinstance(decoded, dict) else None
+
+    def mark_guardrail_halt_record_delivered(self, session_id: str) -> None:
+        """Record that the strategy-shift note has reached the model.
+
+        Marked rather than deleted, so the account of a halt outlives its own
+        delivery and can be audited. Read-modify-write inside one transaction,
+        so a concurrent turn cannot interleave a fresh halt into the update.
+        """
+        if not session_id:
+            return
+
+        def _do(conn):
+            row = conn.execute(
+                "SELECT guardrail_halt_record FROM sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if not row or not row[0]:
+                return
+            try:
+                record = json.loads(row[0])
+            except (ValueError, TypeError):
+                return
+            if not isinstance(record, dict) or record.get("delivered") is True:
+                return
+            record["delivered"] = True
+            conn.execute(
+                "UPDATE sessions SET guardrail_halt_record = ? WHERE id = ?",
+                (json.dumps(record, sort_keys=True, ensure_ascii=False), session_id),
+            )
+
+        self._execute_write(_do)
+
     def update_session_meta(
         self,
         session_id: str,

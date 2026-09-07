@@ -573,3 +573,85 @@ def test_idempotent_no_progress_catches_aliased_file_paths():
     d2_after = controller.after_call("read_file", {"path": "foo.py"}, "content of foo.py", failed=False)
     assert d2_after.action == "warn"
     assert d2_after.code == "idempotent_no_progress_warning"
+
+
+# ── The halt record: the decision's durable account ─────────────────────────
+#
+# A halt that stops a turn is remembered by the turn that follows it, even when
+# nothing of the process that raised it survives the gap. What is stored is a
+# rendering of the decision, and the thing read back must render the same
+# strategy-shift note the live decision would have -- otherwise the user is
+# told to change strategy about something other than what stopped the turn.
+
+def test_a_halt_renders_to_a_record_that_survives_json():
+    """The record crosses a process boundary, so it must be storable as-is."""
+    decision = _halt_decision()
+    record = decision.halt_record()
+
+    assert json.loads(json.dumps(record)) == record
+    # The fields the note and the status line are built from all survive.
+    assert record["code"] == decision.code
+    assert record["tool_name"] == decision.tool_name
+    assert record["count"] == decision.count
+
+
+def test_a_stored_record_rebuilds_the_decision_that_owed_the_note():
+    """Round-tripping must not change what the model is told on the next turn."""
+    decision = _halt_decision()
+
+    rebuilt = ToolGuardrailDecision.from_halt_record(
+        json.loads(json.dumps(decision.halt_record()))
+    )
+
+    assert rebuilt is not None
+    assert rebuilt.resumption_note() == decision.resumption_note()
+    assert rebuilt.status_line() == decision.status_line()
+
+
+def test_an_unusable_record_yields_no_halt_rather_than_a_fabricated_one():
+    """A record we cannot read is treated as no halt, never as a guessed halt.
+
+    The removed recovery-by-prose scan fabricated a strategy-shift instruction
+    from message text; nothing may fabricate one from a half-readable record.
+    """
+    assert ToolGuardrailDecision.from_halt_record(None) is None
+    assert ToolGuardrailDecision.from_halt_record({}) is None
+    assert ToolGuardrailDecision.from_halt_record("not a mapping") is None
+    # A record with no code cannot name which guardrail stopped the turn.
+    assert ToolGuardrailDecision.from_halt_record({"tool_name": "terminal"}) is None
+
+
+def test_a_record_with_garbled_fields_degrades_instead_of_poisoning_the_note():
+    """One bad field costs its own detail, not the whole instruction."""
+    rebuilt = ToolGuardrailDecision.from_halt_record(
+        {
+            "action": "halt",
+            "code": "sequence_repeat_halt",
+            "count": "not a number",
+            "tool_name": 42,
+            "message": None,
+        }
+    )
+
+    assert rebuilt is not None
+    assert rebuilt.code == "sequence_repeat_halt"
+    assert rebuilt.count == 0
+    assert rebuilt.tool_name == ""
+    assert rebuilt.resumption_note().startswith("[System Instruction:")
+
+
+def test_a_record_keeps_the_call_signature_it_was_raised_on():
+    """The signature is part of the account, not an afterthought.
+
+    It is what lets a later reader see which exact call the guardrail gave up
+    on, and it is public metadata only -- no raw argument values.
+    """
+    decision = _halt_decision(
+        signature=ToolCallSignature(tool_name="terminal", args_hash="ab" * 32)
+    )
+    record = decision.halt_record()
+    assert record["signature"] == {"tool_name": "terminal", "args_hash": "ab" * 32}
+
+    rebuilt = ToolGuardrailDecision.from_halt_record(record)
+    assert rebuilt is not None
+    assert rebuilt.signature == decision.signature

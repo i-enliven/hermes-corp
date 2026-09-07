@@ -26,6 +26,7 @@ import logging
 import os
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
+from agent.guardrail_record import write_halt_record
 from agent.message_content import flatten_message_text
 from agent.message_metadata import append_message, stamp_message_timestamp
 from agent.message_sanitization import _sanitize_surrogates
@@ -737,6 +738,15 @@ def finalize_turn(
     if halt_decision is not None:
         result["guardrail"] = halt_decision.to_metadata()
         guardrail_state.arm_resumption(halt_decision)
+        # The account of this halt, stored so the next turn can be told even if
+        # this agent object does not outlive the gap between them. It is a nudge:
+        # a store that refuses it costs the user the nudge and not the turn.
+        write_halt_record(agent, halt_decision)
+    if guardrail_state.resumption_delivered is not None:
+        # Its own key, deliberately not nested under "guardrail": that key means
+        # "this turn was stopped", and a turn which merely delivered a note from
+        # the turn before it was not. One key, one meaning.
+        result["guardrail_resumption_delivered"] = True
     # Persistence failures already set failed=True + an explanation in
     # final_response; also stamp `error` so gateway surfaces status="error"
     # (and desktop can toast the cause) instead of a quiet complete frame.

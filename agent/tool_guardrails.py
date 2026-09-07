@@ -225,6 +225,22 @@ class ToolCallSignature:
         """Return public metadata without raw argument values."""
         return {"tool_name": self.tool_name, "args_hash": self.args_hash}
 
+    @classmethod
+    def from_metadata(cls, data: Any) -> "ToolCallSignature | None":
+        """The declared inverse of :meth:`to_metadata`, or None if unusable.
+
+        Kept beside the rendering it inverts so the pair cannot drift: a record
+        written before ``to_metadata`` changed shape fails here rather than
+        silently rebuilding a different call.
+        """
+        if not isinstance(data, dict):
+            return None
+        tool_name = data.get("tool_name")
+        args_hash = data.get("args_hash")
+        if not isinstance(tool_name, str) or not isinstance(args_hash, str):
+            return None
+        return cls(tool_name=tool_name, args_hash=args_hash)
+
 
 @dataclass(frozen=True)
 class ToolGuardrailDecision:
@@ -304,6 +320,66 @@ class ToolGuardrailDecision:
                 "guardrail": self.to_metadata(),
             },
             ensure_ascii=False,
+        )
+
+    def halt_record(self, *, delivered: bool = False) -> dict[str, Any]:
+        """The account of this halt, in the form a session stores between turns.
+
+        A halt stops one turn and its consequence is felt by the next, so the
+        account has to outlive the process that raised it: a restart, a gateway
+        cache eviction, or an idle reap otherwise drops it and the user gets no
+        strategy-shift instruction and no hint one was owed.
+
+        This is a *rendering*, not a second assembly. The fields are exactly the
+        ones the renderings above read, so a stored halt and a live one cannot
+        drift into describing different events; :meth:`from_halt_record` is its
+        declared inverse. ``delivered`` is the one field the decision itself has
+        no notion of -- whether the model has been told yet -- so it is stamped
+        by the writer rather than derived.
+        """
+        record: dict[str, Any] = {
+            "action": self.action,
+            "code": self.code,
+            "message": self.message,
+            "tool_name": self.tool_name,
+            "count": self.count,
+            "delivered": bool(delivered),
+        }
+        if self.signature is not None:
+            record["signature"] = self.signature.to_metadata()
+        return record
+
+    @classmethod
+    def from_halt_record(cls, record: Any) -> "ToolGuardrailDecision | None":
+        """Rebuild the decision a stored halt record accounts for, or None.
+
+        None means *no halt*, and the caller must treat it exactly as it treats
+        the absence of a record. It is never a halt with blanked-out fields: the
+        removed recovery-by-prose scan fabricated a strategy-shift instruction
+        out of text that merely resembled one, and nothing here may do the
+        equivalent with a half-readable record. A record that cannot name which
+        guardrail stopped the turn is therefore discarded rather than guessed at.
+
+        Individual fields degrade on their own -- a garbled ``count`` costs the
+        count, not the instruction -- because the point of delivering the record
+        is that the model is told to change strategy at all.
+        """
+        if not isinstance(record, dict):
+            return None
+        code = record.get("code")
+        if not isinstance(code, str) or not code:
+            return None
+
+        action = record.get("action")
+        message = record.get("message")
+        tool_name = record.get("tool_name")
+        return cls(
+            action=action if isinstance(action, str) and action else "halt",
+            code=code,
+            message=message if isinstance(message, str) else "",
+            tool_name=tool_name if isinstance(tool_name, str) else "",
+            count=_non_negative_int(record.get("count"), 0),
+            signature=ToolCallSignature.from_metadata(record.get("signature")),
         )
 
 
@@ -401,6 +477,17 @@ class TurnGuardrailState:
             if decision is not None:
                 self._resumption_delivered = decision
         return decision
+
+    def record_delivery(self, decision: ToolGuardrailDecision) -> None:
+        """Note that a strategy-shift instruction reached the model this turn.
+
+        The in-memory handoff records this itself as it is spent; this is the route
+        for a note that came from the stored account instead, so that both routes
+        answer "was the model told?" of the same turn and the turn result reports
+        the delivery the same way whichever one delivered it.
+        """
+        with self._lock:
+            self._resumption_delivered = decision
 
 
 _PATH_KEYS = frozenset({"path", "file_path", "filepath", "target_file"})

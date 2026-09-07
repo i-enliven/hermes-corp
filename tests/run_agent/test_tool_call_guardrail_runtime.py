@@ -536,6 +536,11 @@ def test_default_run_conversation_warns_without_guardrail_halt():
     assert mock_hfc.call_count == 3
     assert result["turn_exit_reason"].startswith("text_response")
     assert "guardrail" not in result
+    # The other half of "exactly when". Absence of the halt key says the turn
+    # was not stopped; the delivery flag being unset says no note was handed
+    # over. A finalizer that set it unconditionally would pass every positive
+    # test in this file and fail only here.
+    assert "guardrail_resumption_delivered" not in result
     assert result["final_response"] == "done"
     tool_contents = [m["content"] for m in result["messages"] if m.get("role") == "tool"]
     assert any("repeated_exact_failure_warning" in content for content in tool_contents)
@@ -772,3 +777,454 @@ def test_turn_resumption_after_guardrail_halt_injects_strategy_shift():
     # halted turn armed it, this turn spent it.
     assert agent._turn_state.guardrails.resumption_delivered is not None
     assert agent._turn_state.guardrails.pending_resumption is None
+
+
+
+
+# ── The halt record: the account that outlives the agent ────────────────────
+#
+# Everything above tests a halt within one live agent. These test the gap between
+# two turns, which is where the agent object is not guaranteed to survive: a
+# restart, a gateway cache eviction, an idle reap, a cron firing that mints a
+# fresh agent every time. The in-memory handoff cannot cross any of those, and
+# the fallback that used to -- greping the previous assistant's text for the
+# phrase "hit the tool-call guardrail" -- was deleted in ticket #2 because it
+# fabricated strategy shifts out of prose that merely discussed guardrails.
+#
+# So the account of a halt is stored, on the session, and read back through one
+# narrow port. These are the tests the ticket says do not exist today.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _persisted_agent(session_id: str, *tool_names: str, config: dict | None = None,
+                     max_iterations: int = 10):
+    """An agent wired to a real session store, the way production wires one.
+
+    `_make_agent` leaves persistence off, which is right for every test above and
+    wrong for these: a halt record only matters across the gap between two turns,
+    and that gap is only real if the store is.
+    """
+    from hermes_state import SessionDB
+
+    agent = _make_agent(*tool_names, max_iterations=max_iterations, config=config)
+    agent._persist_disabled = False
+    agent._session_db = SessionDB()
+    agent.session_id = session_id
+    return agent
+
+
+def _halt_a_turn(agent, prompt: str = "search repeatedly"):
+    """Drive one turn to a guardrail halt and hand back its result.
+
+    The halt is produced the way the journey test produces it -- repeated
+    identical calls under a hard-stop config -- so the record under test is one a
+    real halt made, not one a test assembled.
+    """
+    same_args = {"query": "same"}
+    agent.client.chat.completions.create.side_effect = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("web_search", json.dumps(same_args), f"c{i}")],
+        )
+        for i in range(1, 10)
+    ]
+    agent._disable_streaming = True
+    with (
+        patch("run_agent.handle_function_call", return_value=json.dumps({"error": "boom"})),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        return agent.run_conversation(prompt)
+
+
+def test_a_halt_survives_a_restart_and_still_buys_the_strategy_shift(tmp_path):
+    """The ticket's premise, tested as stated: a halt the model was never told
+    about still buys the strategy shift after the process comes back cold.
+
+    Two agents, one session, one store between them. The second is constructed
+    fresh, so it holds no in-memory handoff -- which is the whole point: the note
+    it delivers can only have come from the stored account. A test that reused the
+    first agent would pass whether or not the record was ever written.
+    """
+    session_id = "restart-halt-session"
+    agent = _persisted_agent(session_id, "web_search", config=_hard_stop_config())
+    result = _halt_a_turn(agent)
+    assert result["turn_exit_reason"] == "guardrail_halt"
+
+    # The account exists, undelivered: the halt stopped the turn and the model
+    # has not been told yet.
+    stored = agent._session_db.read_guardrail_halt_record(session_id)
+    assert stored is not None
+    assert stored["delivered"] is False
+
+    # A fresh agent over the same session and the same store: the cold start.
+    survivor = _persisted_agent(session_id, "web_search", config=_hard_stop_config())
+    survivor.client.close = MagicMock()
+
+    captured: list = []
+
+    def _capture(**kwargs):
+        captured.extend(kwargs.get("messages", []))
+        return _mock_response(content="I will change approach.", finish_reason="stop")
+
+    survivor.client.chat.completions.create.side_effect = _capture
+    with (
+        patch.object(survivor, "_save_trajectory"),
+        patch.object(survivor, "_cleanup_task_resources"),
+    ):
+        survivor.run_conversation("what should we do next?")
+
+    user_msgs = [m for m in captured if m.get("role") == "user"]
+    assert user_msgs, "the resumed turn never reached the model"
+    content = user_msgs[-1].get("content", "")
+    assert "MANDATORY STRATEGY SHIFT: Do NOT immediately emit another inspection or tool call." in content
+    assert "summarize what you have learned so far" in content
+    # The note names the halt it answers, so the model can act on the right one.
+    assert "web_search" in content
+
+
+def test_a_halt_survives_the_agent_being_released_from_the_cache(tmp_path):
+    """Drive the gateway's real release path, not a stand-in for it.
+
+    Eviction and idle reap are two triggers of one shared method,
+    ``GatewayRunner._release_evicted_agent_soft``, so this exercises that method
+    directly and thereby covers both. Driving it rather than dropping a local
+    reference matters because the method does not merely let the object go: it
+    actively empties ``_session_messages`` and drops ``_db_flush_scan_prefix``,
+    and its whole stated purpose is reclaiming memory from a cached session.
+
+    That purpose is the regression this test exists for. The plausible next edit
+    to a method whose job is freeing memory is to free the halt record with the
+    rest of it -- and no other test here would notice, because the restart test
+    discards the agent instead of releasing it. So the assertions below first
+    prove the real method ran and really mutated the agent, and only then that
+    the account outlived it.
+    """
+    from gateway.run import GatewayRunner
+
+    session_id = "released-halt-session"
+    agent = _persisted_agent(session_id, "web_search", config=_hard_stop_config())
+    assert _halt_a_turn(agent)["turn_exit_reason"] == "guardrail_halt"
+
+    # Precondition for the proof below: there has to be something to reclaim, or
+    # "the list is empty afterwards" would pass on an agent that never ran.
+    assert getattr(agent, "_session_messages", None), "the halted turn kept no history to free"
+
+    released_clients = MagicMock()
+    agent.release_clients = released_clients
+    # The method needs only this from `self`, and only on the fallback branch that
+    # a real AIAgent never takes because it has `release_clients`.
+    runner_self = SimpleNamespace(_cleanup_agent_resources=MagicMock())
+
+    GatewayRunner._release_evicted_agent_soft(runner_self, agent)
+
+    # The real method really ran, and really did its reclaiming. Without these the
+    # test would still pass if the call were commented out, which is the whole
+    # difference between driving a path and naming it.
+    released_clients.assert_called_once()
+    assert agent._session_messages == []
+    assert agent._db_flush_scan_prefix is None
+    runner_self._cleanup_agent_resources.assert_not_called()
+
+    # And the account outlived the reclamation, because it lives in the session
+    # row and not in the memory the method exists to free.
+    stored = agent._session_db.read_guardrail_halt_record(session_id)
+    assert stored is not None
+    assert stored["delivered"] is False
+
+    replacement = _persisted_agent(session_id, "web_search", config=_hard_stop_config())
+    replacement.client.close = MagicMock()
+    captured: list = []
+
+    def _capture(**kwargs):
+        captured.extend(kwargs.get("messages", []))
+        return _mock_response(content="Understood.", finish_reason="stop")
+
+    replacement.client.chat.completions.create.side_effect = _capture
+    with (
+        patch.object(replacement, "_save_trajectory"),
+        patch.object(replacement, "_cleanup_task_resources"),
+    ):
+        replacement.run_conversation("carry on")
+
+    user_msgs = [m for m in captured if m.get("role") == "user"]
+    assert user_msgs, "the turn after the release never reached the model"
+    assert "MANDATORY STRATEGY SHIFT" in user_msgs[-1].get("content", "")
+
+
+def test_a_store_that_refuses_the_record_costs_the_nudge_and_not_the_turn(tmp_path):
+    """A halt record is a nudge, not a checkpoint.
+
+    The ticket asks for exactly this asymmetry, and it is the reason the write
+    sits inside its own guard rather than beside the ones that decide the turn's
+    outcome: a database that will not take the account must not be allowed to
+    lose the user their answer. The turn still halts, the same-process handoff is
+    still armed, and the failure is said out loud.
+    """
+    from agent import guardrail_record as record_port
+
+    session_id = "refusing-store-session"
+    agent = _persisted_agent(session_id, "web_search", config=_hard_stop_config())
+
+    complaints = []
+
+    class _Stubborn(type(agent._session_db)):
+        # Subclassing the real store rather than stubbing it: the point is that
+        # ONE write refuses, not that the database is absent. Every other call the
+        # turn makes on the store still works, so a failure here can only be the
+        # record's own.
+        def write_guardrail_halt_record(self, _sid, _record):
+            raise RuntimeError("the disk is full")
+    agent._session_db = _Stubborn()
+
+    with patch.object(record_port.logger, "warning", side_effect=lambda *a, **k: complaints.append(a)):
+        result = _halt_a_turn(agent)
+
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    assert "stopped retrying" in (result["final_response"] or "")
+    # The user still gets the halt's own explanation, and the same-process handoff
+    # is still armed: only the durable copy was lost.
+    assert agent._turn_state.guardrails.pending_resumption is not None
+    assert complaints, "a lost halt record was swallowed without a word"
+
+    # Criterion 5's third clause. The durable copy never landed, so the route a
+    # cold restart would take comes up empty: the nudge lives only in memory, and
+    # no later turn is nudged twice for a halt already explained.
+    assert record_port.take_halt_decision(agent) is None, (
+        "a record the store refused must not resurface on a later turn")
+
+
+def test_the_halt_record_never_reaches_the_provider_payload(tmp_path):
+    """The account is the agent's own business; the provider sees a sentence.
+
+    The stored account is structured data about a guardrail -- its code, its
+    count, the hash of the arguments that tripped it. None of that belongs in a
+    request. What the model is told is the rendered instruction, in prose, and
+    nothing else. This is the leak test the ticket asks for, and it is worth
+    stating plainly because the cheapest way to make the durable route work would
+    be to hand the model the record and let it read its own history.
+    """
+    session_id = "no-leak-session"
+    agent = _persisted_agent(session_id, "web_search", config=_hard_stop_config())
+    assert _halt_a_turn(agent)["turn_exit_reason"] == "guardrail_halt"
+    stored = agent._session_db.read_guardrail_halt_record(session_id)
+    assert stored is not None
+
+    survivor = _persisted_agent(session_id, "web_search", config=_hard_stop_config())
+    survivor.client.close = MagicMock()
+    captured: list = []
+
+    def _capture(**kwargs):
+        captured.extend(kwargs.get("messages", []))
+        return _mock_response(content="Noted.", finish_reason="stop")
+
+    survivor.client.chat.completions.create.side_effect = _capture
+    with (
+        patch.object(survivor, "_save_trajectory"),
+        patch.object(survivor, "_cleanup_task_resources"),
+    ):
+        survivor.run_conversation("and now?")
+
+    payload = json.dumps(captured)
+    # The stored account as a whole stays out. This is the leak that would matter:
+    # the cheap way to wire the durable route is to hand the model the record and
+    # let it read its own history, which is the design the ticket rejects.
+    assert json.dumps(stored) not in payload
+    # The agent's own bookkeeping about whether it has told the model yet. The
+    # model has no business knowing that, and it is not part of any rendering.
+    assert '"delivered"' not in payload
+    # What the model IS told, it is told as prose. The code and the count appear
+    # inside the rendered sentence on purpose -- a refusal the model cannot act on
+    # is a worse outcome than a named one -- so the assertion here is about shape,
+    # not about absence.
+    user_msgs = [m for m in captured if m.get("role") == "user"]
+    assert "MANDATORY STRATEGY SHIFT" in user_msgs[-1].get("content", "")
+
+
+def test_nothing_reads_a_halt_out_of_prose_that_merely_discussed_guardrails(tmp_path):
+    """The durable route must not become the deleted one by another name.
+
+    Ticket #2 removed a fallback that recovered a halt by searching the previous
+    assistant message for the phrase "hit the tool-call guardrail", because it
+    fabricated strategy shifts whenever an assistant merely talked about
+    guardrails. Storing the account is the answer to that, so the durable route
+    has to fail the same way the deleted route would have: an assistant turn full
+    of halt wording, and no stored account, must buy no instruction.
+    """
+    session_id = "prose-only-session"
+    agent = _persisted_agent(session_id, "web_search", config=_hard_stop_config())
+
+    halt_wording = (
+        "I stopped retrying web_search because it hit the tool-call guardrail "
+        "(repeated_exact_failure_block) after 3 repeated non-progressing attempts."
+    )
+    survivor = _persisted_agent(session_id, "web_search", config=_hard_stop_config())
+    survivor.client.close = MagicMock()
+    assert survivor._session_db.read_guardrail_halt_record(session_id) is None
+
+    captured: list = []
+
+    def _capture(**kwargs):
+        captured.extend(kwargs.get("messages", []))
+        return _mock_response(content="Right, continuing.", finish_reason="stop")
+
+    survivor.client.chat.completions.create.side_effect = _capture
+    with (
+        patch.object(survivor, "_save_trajectory"),
+        patch.object(survivor, "_cleanup_task_resources"),
+    ):
+        survivor.run_conversation(
+            "what next?",
+            conversation_history=[
+                {"role": "user", "content": "tell me about the guardrails"},
+                {"role": "assistant", "content": halt_wording},
+            ],
+        )
+
+    user_msgs = [m for m in captured if m.get("role") == "user"]
+    assert user_msgs, "the turn never reached the model"
+    assert "MANDATORY STRATEGY SHIFT" not in user_msgs[-1].get("content", "")
+
+
+def test_a_delivered_note_is_not_delivered_twice_across_a_restart(tmp_path):
+    """Delivery is recorded, so a cold start cannot repeat an instruction.
+
+    The account outlives its own delivery so it can be audited, which means
+    reading it has to ask whether it was already acted on. Without that the
+    first cold turn after a later restart would nudge a second time for a halt
+    the model was told about hours earlier -- the same class of bug as the prose
+    fallback, arriving from the opposite direction.
+    """
+    session_id = "delivered-once-session"
+    agent = _persisted_agent(session_id, "web_search", config=_hard_stop_config())
+    assert _halt_a_turn(agent)["turn_exit_reason"] == "guardrail_halt"
+
+    # The same-process route serves the next turn, and records the delivery.
+    agent.client.chat.completions.create.side_effect = [
+        _mock_response(content="I will change approach.", finish_reason="stop")
+    ]
+    agent._disable_streaming = True
+    with (
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        told = agent.run_conversation("what now?")
+    assert told["guardrail_resumption_delivered"] is True
+    assert agent._session_db.read_guardrail_halt_record(session_id)["delivered"] is True
+
+    # And a cold start over the same session owes nothing: it was already told.
+    survivor = _persisted_agent(session_id, "web_search", config=_hard_stop_config())
+    survivor.client.close = MagicMock()
+    captured: list = []
+
+    def _capture(**kwargs):
+        captured.extend(kwargs.get("messages", []))
+        return _mock_response(content="Carrying on.", finish_reason="stop")
+
+    survivor.client.chat.completions.create.side_effect = _capture
+    with (
+        patch.object(survivor, "_save_trajectory"),
+        patch.object(survivor, "_cleanup_task_resources"),
+    ):
+        survivor.run_conversation("and then?")
+
+    user_msgs = [m for m in captured if m.get("role") == "user"]
+    assert user_msgs
+    assert "MANDATORY STRATEGY SHIFT" not in user_msgs[-1].get("content", "")
+
+
+def test_a_session_predating_the_change_carries_a_null_record_and_no_fabricated_nudge(
+    tmp_path,
+):
+    """A session that existed before the record shipped must behave, not merely survive.
+
+    The column arrives NULL for every such session, so the durable route has to read
+    'nothing owed' out of an absent account rather than fall through to something
+    invented. A null read that defaulted to a nudge would hand every old session a
+    strategy shift it never earned, which is the opposite of the ticket's promise.
+    """
+    session_id = "predating-session"
+    agent = _persisted_agent(session_id, "web_search")
+
+    # One ordinary turn, so the row comes into being with history and still no account.
+    agent.client.chat.completions.create.side_effect = [
+        _mock_response(content="all good", finish_reason="stop", tool_calls=None),
+    ]
+    with (
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        first = agent.run_conversation("hi there")
+    assert first["turn_exit_reason"].startswith("text_response")
+
+    stored = agent._session_db.read_guardrail_halt_record(session_id)
+    assert stored is None, "a session that never halted has no account"
+
+    # A fresh agent on the same session, the way a cold resume arrives at it.
+    survivor = _persisted_agent(session_id, "web_search")
+    survivor.client.close = MagicMock()
+    captured: list = []
+
+    def _capture(**kwargs):
+        captured.extend(kwargs.get("messages", []))
+        return _mock_response(content="fine", finish_reason="stop", tool_calls=None)
+
+    survivor.client.chat.completions.create.side_effect = _capture
+    with (
+        patch.object(survivor, "_save_trajectory"),
+        patch.object(survivor, "_cleanup_task_resources"),
+    ):
+        survivor.run_conversation("and now?")
+
+    payload = json.dumps(captured)
+    assert "MANDATORY STRATEGY SHIFT" not in payload
+    assert "summarize what you have learned" not in payload
+    assert survivor._session_db.read_guardrail_halt_record(session_id) is None
+
+
+def test_one_firing_neither_reads_nor_writes_another_firings_record(tmp_path):
+    """Two sessions sharing one store keep two separate accounts.
+
+    A cron firing mints a fresh agent every time, and the gateway reuses agents
+    across sessions, so the account has to be keyed by session and nothing else.
+    A record that bled across would nudge a run that never halted, and a write
+    that landed in the wrong row would spend another firing's nudge before it
+    arrived. Both are checked here, on one shared store.
+    """
+    first = _persisted_agent("firing-one", "web_search", config=_hard_stop_config())
+    assert _halt_a_turn(first)["turn_exit_reason"] == "guardrail_halt"
+    record_one = first._session_db.read_guardrail_halt_record("firing-one")
+    assert record_one is not None
+
+    # A different session, same store, same tools: it has halted nothing.
+    other = _persisted_agent("firing-two", "web_search", config=_hard_stop_config())
+    assert other._session_db.read_guardrail_halt_record("firing-two") is None
+
+    # And when the second one halts in its own right, it spends its own account
+    # and leaves the first one's exactly as it was.
+    assert _halt_a_turn(other)["turn_exit_reason"] == "guardrail_halt"
+    record_two = other._session_db.read_guardrail_halt_record("firing-two")
+    assert record_two is not None
+    assert other._session_db.read_guardrail_halt_record("firing-one") == record_one
+
+    # Each cold resume collects its own nudge, and only its own.
+    resume_one = _persisted_agent("firing-one", "web_search")
+    resume_one.client.close = MagicMock()
+    seen_one: list = []
+
+    def _capture_one(**kwargs):
+        seen_one.extend(kwargs.get("messages", []))
+        return _mock_response(content="ok", finish_reason="stop", tool_calls=None)
+
+    resume_one.client.chat.completions.create.side_effect = _capture_one
+    with (
+        patch.object(resume_one, "_save_trajectory"),
+        patch.object(resume_one, "_cleanup_task_resources"),
+    ):
+        resume_one.run_conversation("and now?")
+
+    assert any(
+        "MANDATORY STRATEGY SHIFT" in m.get("content", "")
+        for m in seen_one if m.get("role") == "user"
+    )
+    assert json.dumps(seen_one).count("MANDATORY STRATEGY SHIFT") == 1

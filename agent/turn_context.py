@@ -39,6 +39,7 @@ from agent.conversation_compression import (
     recover_rotated_compression_session,
 )
 from agent.context_engine import automatic_compaction_status_message
+from agent.guardrail_record import mark_halt_delivered, take_halt_decision
 from agent.iteration_budget import IterationBudget
 from agent.memory_manager import build_memory_context_block
 from agent.memory_provider import is_trivial_prompt
@@ -153,22 +154,47 @@ def consume_gateway_turn_context_notes(agent: Any) -> str:
 
 
 def consume_guardrail_resumption_note(agent: Any) -> str:
-    """Consume the pending resumption handoff and render its strategy-shift note (one-shot).
+    """Consume the owed resumption handoff and render its strategy-shift note (one-shot).
 
-    The in-memory handoff recorded by the turn finalizer is the only route to a
-    resumption note. Deciding that a halt happened by matching halt wording in
-    message text was removed: an assistant message that merely quoted that
-    wording while discussing guardrails caused the following user message to be
-    delivered with a fabricated system instruction. A halt that was never
-    recorded on the agent therefore yields no note; durability across process
-    boundaries is the halt record's job, not this function's.
+    Two routes, tried in order, and both are typed facts rather than text:
+
+    1. the in-memory handoff the turn finalizer armed, which serves the common
+       case where the agent object outlives the gap between the two turns -- the
+       gateway and the terminal UI both reuse one agent across a session;
+    2. the halt record stored against the session, which serves the gap when the
+       object does not survive it: a restart, a gateway cache eviction, an idle
+       reap, or a scheduled firing that mints a fresh agent each time.
+
+    Deciding that a halt happened by matching halt wording in message text was
+    removed for good: an assistant message that merely quoted that wording while
+    discussing guardrails caused the following user message to be delivered with a
+    fabricated system instruction. Nothing here inspects message content. A session
+    with neither handoff nor stored account yields no note, and no error.
 
     Delivered on the user message via the api_content sidecar to maintain
     byte-stable prefix caching and strict role alternation.
     """
-    halt_decision = agent._turn_state.guardrails.take_pending_resumption()
-    if halt_decision is None:
-        return ""
+    guardrails = agent._turn_state.guardrails
+    halt_decision = guardrails.take_pending_resumption()
+    if halt_decision is not None:
+        # The in-memory handoff served it, and the stored account has to be told so
+        # as well. It was written reading "not yet told" and nothing else on this
+        # route will ever correct that, so left alone it would have the first cold
+        # turn after a later restart nudge again for a halt the model was told about
+        # hours ago -- the same class of fault as the deleted prose fallback, arriving
+        # from the opposite direction. Marked rather than deleted, so the account of
+        # a halt outlives its own delivery and can still be audited.
+        mark_halt_delivered(agent)
+    else:
+        # Nothing owed in memory. The stored account may still owe it, and reading
+        # it is what makes the instruction survive the loss of this agent object.
+        # That route marks the account itself as it reads, so all that is left is to
+        # tell the turn, which keeps the delivery reportable the same way whichever
+        # route supplied the note.
+        halt_decision = take_halt_decision(agent)
+        if halt_decision is None:
+            return ""
+        guardrails.record_delivery(halt_decision)
     return halt_decision.resumption_note()
 
 
