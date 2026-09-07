@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -272,12 +273,15 @@ class ToolGuardrailDecision:
         )
 
     def resumption_note(self) -> str:
-        """The one-shot strategy-shift instruction delivered on the next turn."""
+        """The one-shot strategy-shift instruction delivered on the next turn.
+
+        ``tool_name`` is genuinely optional, so it degrades; ``code`` always
+        carries the guardrail's own name, so it does not need to.
+        """
         tool_str = f" on '{self.tool_name}'" if self.tool_name else ""
-        code = self.code or "guardrail_halt"
         return (
             f"[System Instruction: The previous turn was halted by a tool-call guardrail{tool_str} "
-            f"({code}) due to repeated unprogressing actions. "
+            f"({self.code}) due to repeated unprogressing actions. "
             "MANDATORY STRATEGY SHIFT: Do NOT immediately emit another inspection or tool call. "
             "You must first summarize what you have learned so far from your previous attempts, explain the blocker, "
             "and ask the user for guidance or propose an alternative strategy before executing any more tools.]"
@@ -303,25 +307,58 @@ class ToolGuardrailDecision:
         )
 
 
-@dataclass
 class TurnGuardrailState:
     """The guardrail account of a single turn.
 
-    Two facts live here and nowhere else: which decision stopped the current
-    turn, and whether that halt's resumption note is still owed to the model.
-    The halt fact is per-turn and is cleared when a turn begins. The owed
-    handoff deliberately survives that clearing, because its whole purpose is
-    to cross the boundary into the following turn.
+    Three facts live here and nowhere else: which decision stopped the current
+    turn, whether that halt's resumption note is still owed to the model, and
+    whether one was actually delivered. The halt fact is per-turn and is cleared
+    when a turn begins. The owed handoff deliberately survives that clearing,
+    because its whole purpose is to cross the boundary into the following turn.
+
+    The three facts are read-only from outside: they are set only through
+    :meth:`record_halt`, :meth:`arm_resumption` and :meth:`take_pending_resumption`,
+    so no module further along the journey can rewrite the cause the user is told
+    about. That is the point of having one owner rather than two stores.
+
+    The writes are guarded by a lock because they are reached from tool worker
+    threads: parallel-safe tools run concurrently, and two of them halting in one
+    batch would otherwise race the first-wins check in :meth:`record_halt`,
+    leaving which guardrail the turn blames down to thread scheduling.
     """
 
-    halt_decision: ToolGuardrailDecision | None = None
-    pending_resumption: ToolGuardrailDecision | None = None
-    resumption_delivered: ToolGuardrailDecision | None = None
+    def __init__(self) -> None:
+        self._halt_decision: ToolGuardrailDecision | None = None
+        self._pending_resumption: ToolGuardrailDecision | None = None
+        self._resumption_delivered: ToolGuardrailDecision | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def halt_decision(self) -> ToolGuardrailDecision | None:
+        """The decision that first stopped this turn, or ``None`` if none has."""
+        return self._halt_decision
+
+    @property
+    def pending_resumption(self) -> ToolGuardrailDecision | None:
+        """The decision whose strategy-shift note the next turn is still owed."""
+        return self._pending_resumption
+
+    @property
+    def resumption_delivered(self) -> ToolGuardrailDecision | None:
+        """The note this turn actually handed to the model, once it has been spent.
+
+        Kept distinct from :attr:`pending_resumption` because an empty handoff is
+        ambiguous: it means either "delivered" or "there was never a halt to
+        deliver for". Read today by the tests that pin the handoff's journey; the
+        durable halt record is the change with a production reason to read it.
+        """
+        return self._resumption_delivered
 
     def begin_turn(self) -> None:
         """Open a turn: forget the previous turn's halt, keep any owed handoff."""
-        self.halt_decision = None
-        self.resumption_delivered = None
+        with self._lock:
+            self._halt_decision = None
+            self._resumption_delivered = None
 
     def record_halt(self, decision: ToolGuardrailDecision | None) -> bool:
         """Record the decision that stopped this turn. The first one wins.
@@ -333,34 +370,36 @@ class TurnGuardrailState:
         """
         if decision is None or not decision.should_halt:
             return False
-        if self.halt_decision is None:
-            self.halt_decision = decision
-            return True
-        return False
+        with self._lock:
+            if self._halt_decision is None:
+                self._halt_decision = decision
+                return True
+            return False
 
-    def arm_resumption(self, decision: ToolGuardrailDecision | None = None) -> None:
-        """Owe the strategy-shift note to the turn that follows this one.
+    def arm_resumption(self, decision: ToolGuardrailDecision) -> None:
+        """Owe ``decision``'s strategy-shift note to the turn that follows this one.
 
-        Defaults to the decision that stopped this turn; a caller may name the
-        decision explicitly when it knows which halt is being handed over.
+        The caller names the decision explicitly rather than having this infer it
+        from the recorded halt: the two are the same value today, but a handoff is
+        a deliberate act and should say what it is handing over.
         """
-        chosen = decision if decision is not None else self.halt_decision
-        if chosen is not None:
-            self.pending_resumption = chosen
+        if decision is None:
+            return
+        with self._lock:
+            self._pending_resumption = decision
 
     def take_pending_resumption(self) -> ToolGuardrailDecision | None:
         """Consume the owed handoff, if any, so it is delivered exactly once.
 
-        The consumed decision stays readable through ``resumption_delivered`` for
-        the rest of the turn, so "was the model told?" stays a question that can be
-        asked rather than inferred from the handoff being empty -- an empty handoff
-        also means no halt ever happened. The turn finalizer reads it to report
-        the delivery on the turn result.
+        The consumed decision stays readable through :attr:`resumption_delivered`
+        for the rest of the turn, so "was the model told?" remains a question that
+        can be asked of the turn rather than inferred from the handoff being empty.
         """
-        decision = self.pending_resumption
-        self.pending_resumption = None
-        if decision is not None:
-            self.resumption_delivered = decision
+        with self._lock:
+            decision = self._pending_resumption
+            self._pending_resumption = None
+            if decision is not None:
+                self._resumption_delivered = decision
         return decision
 
 

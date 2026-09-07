@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from tests.guardrail_test_helpers import halt_decision as _halt_decision
 from agent.tool_guardrails import (
     ToolCallGuardrailConfig,
     ToolCallGuardrailController,
@@ -24,16 +25,6 @@ from agent.tool_guardrails import (
 # constructing an agent, and there is exactly one place each is written.
 
 
-def _halt_decision(**overrides: Any) -> ToolGuardrailDecision:
-    fields: dict[str, Any] = {
-        "action": "halt",
-        "code": "sequence_repeat_halt",
-        "message": "repeating without progress",
-        "tool_name": "terminal",
-        "count": 4,
-    }
-    fields.update(overrides)
-    return ToolGuardrailDecision(**fields)
 
 
 def test_halt_decision_renders_the_halt_prose_from_its_own_fields():
@@ -203,18 +194,29 @@ def test_halt_decision_is_immutable_once_produced():
         decision.action = "allow"
 
 
-def test_controller_keeps_no_halt_store_of_its_own():
-    # The halt fact has exactly one home. The controller counts and decides; it
-    # must not also keep a copy, which is how two stores came to disagree about
-    # which guardrail stopped a turn.
+def test_the_controller_still_counts_and_decides_after_losing_its_halt_store():
+    """Removing the controller's duplicate halt store must not have cost it its real job.
+
+    The controller counts repeats and issues the decisions; the fact that a turn was
+    stopped belongs to the turn guardrail state and is not its to keep. This asserts
+    the job still gets done -- counters populated, a halt actually issued -- rather
+    than asserting that some private attribute is absent, which would pass while the
+    controller was broken in every other way.
+    """
     controller = ToolCallGuardrailController(ToolCallGuardrailConfig(hard_stop_enabled=True))
     args = {"query": "same"}
-    for _ in range(3):
+    blocked = None
+    for _ in range(12):  # bounded: a regression that never blocks must fail, not hang
         controller.after_call("web_search", args, '{"error":"boom"}', failed=True)
-    controller.before_call("web_search", args)
+        decision = controller.before_call("web_search", args)
+        if decision.action == "block":
+            blocked = decision
+            break
 
-    assert not hasattr(controller, "_halt_decision")
-    assert not hasattr(controller, "halt_decision")
+    assert blocked is not None, "the controller stopped refusing a repeating failure"
+    assert blocked.count >= 1
+    assert controller._exact_failure_counts, "the controller stopped counting repeats"
+    assert controller._same_tool_failure_counts.get("web_search", 0) >= 1
 
 
 def test_tool_call_signature_hashes_canonical_nested_unicode_args_without_exposing_raw_args():
@@ -284,9 +286,7 @@ def test_default_repeated_identical_failed_call_warns_without_blocking():
     assert [d.action for d in decisions[1:]] == ["warn", "warn", "warn", "warn"]
     assert {d.code for d in decisions[1:]} == {"repeated_exact_failure_warning"}
     assert controller.before_call("web_search", args).action == "allow"
-    # Nothing escalated to a stop: every decision above allowed execution, which
-    # is the whole of what the controller reports. It keeps no halt record of
-    # its own — the turn's guardrail state is the single home of that fact.
+    # Every decision above allowed execution, so nothing escalated to a stop.
 
 
 def test_hard_stop_enabled_blocks_repeated_exact_failure_before_next_execution():

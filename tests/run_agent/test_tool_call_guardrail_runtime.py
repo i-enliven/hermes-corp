@@ -6,7 +6,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from agent.tool_guardrails import ToolGuardrailDecision, TurnGuardrailState
+from tests.guardrail_test_helpers import halt_decision as _halt_decision
+from agent.tool_guardrails import TurnGuardrailState
 from run_agent import AIAgent
 
 
@@ -385,89 +386,130 @@ def test_a_halted_turn_reports_its_guardrail_record_and_arms_the_resumption():
     assert agent._guardrail_state.pending_resumption is not None
 
 
-def test_the_first_decision_that_stops_the_turn_is_the_one_reported():
-    """Two guardrails can stop one turn; the cause reported is the first.
+def test_the_first_decision_to_stop_the_turn_is_the_one_the_user_is_told_about():
+    """Two guardrails stop one turn, through the public entry point; the cause reported is the first.
 
     The controller used to keep its own halt, last-writer-wins, while the agent
     kept one that was first-writer-wins, so which guardrail the user was told
     about depended on the order the two stores happened to be written. Both
-    writes now go through one owner and the first decision to stop the turn wins.
-    """
-    state = TurnGuardrailState()
-    first = _halt_decision(code="repeated_exact_failure_block", tool_name="web_search")
-    second = _halt_decision(code="sequence_repeat_block", tool_name="read_file")
+    writes now go through one owner, and nothing in the pipeline may quietly
+    replace the cause once it is set.
 
-    assert state.record_halt(first) is True
-    assert state.record_halt(second) is False
-    assert state.halt_decision is first
+    Driven through ``run_conversation`` rather than by poking the owner directly.
+    Both decisions come from the per-turn runaway-loop caps, which are consulted
+    before a call runs and count from zero at the turn boundary -- so neither
+    depends on a tool result being classified as a failure, and neither needs
+    seeding. The batch is::
 
-    # The handoff carries the cause, not the later escalation.
-    state.arm_resumption()
-    assert state.take_pending_resumption() is first
+        web_search(a)  terminal  web_search(b)  delegate_task(a)  delegate_task(b)
 
+    with both caps set to one. ``terminal`` is not parallel-safe and the two
+    searches carry distinct arguments, so the segment planner puts every call in
+    a segment of its own and they run strictly in the order the model asked for.
+    The two commands succeed, so no failure counter is involved and the caps are
+    the only guardrails that can fire:
 
-def test_the_first_decision_to_stop_the_turn_is_the_one_the_user_is_told_about():
-    """Two guardrails stop one turn; the cause reported is the first, not the last.
+      * the second ``web_search``  -> ``loop_web_search_cap``
+      * the second ``delegate_task`` -> ``loop_subagent_cap``
 
-    Driven through the two writer paths the tool pipeline itself uses, in the
-    order it uses them: the observation path that watches a finished call
-    (``after_call``), then the pre-flight path that refuses a call (``before_call``).
-    Both decisions are produced by the real controller under a real config, so
-    neither is fabricated.
-
-    The same-tool failure ceiling is reached first and halts; the exact-failure
-    ceiling is reached next and blocks. The two arrive from different writer paths
-    with different codes, so which one the user is told about depends entirely on
-    precedence. Before this change the controller kept its own last-writer-wins
-    copy while the agent kept a first-writer-wins copy, and the answer depended on
-    which store happened to be read.
+    Which of the two the turn blames is the whole of what this is about. The
+    assertion is deliberately about *arrival order* rather than about a named
+    code: the segment planner is free to run the calls in whatever order it
+    likes, and pinning a code here would test that policy instead of the one
+    that matters. What must hold however it orders them is that the cause
+    reported is the first decision that stopped the turn, and that every surface
+    the user and the model read agrees on that one.
     """
     config = {
         "tool_loop_guardrails": {
             "warnings_enabled": False,
-            "hard_stop_enabled": True,
-            "hard_stop_after": {"exact_failure": 2, "same_tool_failure": 2},
+            "hard_stop_enabled": False,
+            # A cap of zero disables a limit outright, so both allowances are one:
+            # spent by the first call of each kind, refused on the second.
+            "loop_caps": {"max_subagents": 1, "max_web_searches": 1},
         }
     }
-    agent = _make_agent("terminal", max_iterations=10, config=config)
-    args = {"command": "false"}
+    agent = _make_agent(
+        "web_search", "terminal", "delegate_task", max_iterations=10, config=config
+    )
 
-    # Two identical failing calls observed through the pipeline. The second
-    # reaches the same-tool ceiling and halts: that is the turn's cause.
-    agent._append_guardrail_observation(
-        "terminal", dict(args), json.dumps({"exit_code": 1}), failed=True
-    )
-    agent._append_guardrail_observation(
-        "terminal", dict(args), json.dumps({"exit_code": 1}), failed=True
-    )
+    # Every command succeeds, so no failure counter advances and the caps are the
+    # only guardrails able to stop the turn.
+    def _execute(tool_name: str, args: dict) -> str:
+        return json.dumps({"ok": True})
+
+    # Observe the arrival order at the owner's single write path, without
+    # changing what it does. Every decision that reaches it is noted, whether or
+    # not the owner accepts it as the cause -- first-wins rejects the later one,
+    # and that rejection is the behaviour under test.
+    arrived: list = []
+    accepted: list = []
+    real_record_halt = agent._guardrail_state.record_halt
+
+    def _spy_record_halt(decision):
+        was_accepted = real_record_halt(decision)
+        if decision is not None and decision.should_halt:
+            arrived.append(decision)
+        if was_accepted:
+            accepted.append(decision)
+        return was_accepted
+
+    agent._guardrail_state.record_halt = _spy_record_halt
+
+    search_a = {"query": "alpha"}
+    search_b = {"query": "beta"}
+    spawn_a = {"goal": "investigate"}
+    spawn_b = {"goal": "verify"}
+
+    agent.client.chat.completions.create.side_effect = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[
+                _mock_tool_call("web_search", json.dumps(search_a), "c-search-a"),
+                _mock_tool_call("terminal", json.dumps({"command": "true"}), "c-command"),
+                _mock_tool_call("web_search", json.dumps(search_b), "c-search-b"),
+                _mock_tool_call("delegate_task", json.dumps(spawn_a), "c-delegate-a"),
+                _mock_tool_call("delegate_task", json.dumps(spawn_b), "c-delegate-b"),
+            ],
+        ),
+        _mock_response(content="I will change approach.", finish_reason="stop"),
+    ]
+    agent._disable_streaming = True
+
+    with (
+        patch("run_agent.handle_function_call", side_effect=_execute),
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("search, run a command, then delegate twice")
+
+    assert result["turn_exit_reason"] == "guardrail_halt"
+
+    # Non-vacuity: two *different* guardrails must really have reached the owner,
+    # or "the first one wins" would be asserting nothing at all.
+    assert len(arrived) >= 2, f"expected two competing halts, got {[d.code for d in arrived]}"
+    assert len({d.code for d in arrived}) >= 2, "both halts carried the same code"
+    # Only one of them may be the cause.
+    assert len(accepted) == 1, f"expected exactly one accepted cause, got {[d.code for d in accepted]}"
+
     cause = agent._guardrail_state.halt_decision
     assert cause is not None
-    assert cause.code == "same_tool_failure_halt"
 
-    # A third attempt is refused before it runs, raising a later escalation of
-    # the same loop through the other writer path.
-    escalation = agent._tool_guardrails.before_call("terminal", dict(args))
-    assert escalation.should_halt
-    assert escalation.code == "repeated_exact_failure_block"
-    agent._guardrail_block_result(escalation)
+    # The cause is the first decision that stopped the turn, not the last.
+    assert cause is arrived[0]
+    assert cause is accepted[0]
 
-    # The later escalation must not displace the decision that first stopped the
-    # turn: that is the one the loop renders, the finalizer reports, and the
-    # following turn's resumption note names.
-    assert agent._guardrail_state.halt_decision is cause
-    assert agent._guardrail_state.halt_decision.code == "same_tool_failure_halt"
+    # And every surface the user and the model read agrees on that one cause.
+    assert result["guardrail"]["code"] == cause.code
+    assert result["guardrail"]["tool_name"] == cause.tool_name
+    assert cause.code in result["final_response"]
+    # The note owed to the following turn names the same guardrail, so the model
+    # is told to change strategy about the thing that actually stopped it.
+    assert agent._guardrail_state.pending_resumption is cause
 
 
-def _halt_decision(**overrides: Any) -> ToolGuardrailDecision:
-    fields: dict[str, Any] = {
-        "action": "halt",
-        "code": "sequence_repeat_halt",
-        "message": "repeating without progress",
-        "tool_name": "terminal",
-        "count": 4,
-    }
-    fields.update(overrides)
-    return ToolGuardrailDecision(**fields)
 
 
 def test_default_run_conversation_warns_without_guardrail_halt():
