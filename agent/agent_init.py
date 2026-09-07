@@ -46,7 +46,7 @@ from agent.think_scrubber import StreamingThinkScrubber
 from agent.tool_guardrails import (
     ToolCallGuardrailConfig,
     ToolCallGuardrailController,
-    ToolGuardrailDecision,
+    TurnGuardrailState,
 )
 from hermes_cli.config import cfg_get
 from hermes_cli.route_identity import normalize_route_base_url
@@ -844,8 +844,9 @@ def init_agent(
     # even when stream consumers are registered (no tokens streaming then)
     agent._executing_tools = False
     agent._tool_guardrails = ToolCallGuardrailController()
-    agent._tool_guardrail_halt_decision: ToolGuardrailDecision | None = None
-    agent._pending_guardrail_halt_resumption: ToolGuardrailDecision | None = None
+    # The one home of this turn's guardrail facts: what stopped it, and whether
+    # a resumption note is still owed to the model.
+    agent._guardrail_state = TurnGuardrailState()
     # Interrupt mechanism for breaking out of tool loops
     agent._interrupt_requested = False
     agent._interrupt_message = None  # Optional message that triggered interrupt

@@ -256,6 +256,113 @@ class ToolGuardrailDecision:
             data["signature"] = self.signature.to_metadata()
         return data
 
+    # ── Renderings ───────────────────────────────────────────────────────────
+    # Every human- or machine-readable form of a guardrail decision is a pure
+    # function of the decision itself, so the wording of one halt cannot drift
+    # between the surfaces that show it. None of them need an agent to exercise.
+
+    def halt_prose(self) -> str:
+        """The explanation the user is shown when a halt stops the turn."""
+        tool = self.tool_name or "a tool"
+        return (
+            f"I stopped retrying {tool} because it hit the tool-call guardrail "
+            f"({self.code}) after {self.count} repeated non-progressing "
+            "attempts. The last tool result explains the blocker; the next step is "
+            "to change strategy instead of repeating the same call."
+        )
+
+    def resumption_note(self) -> str:
+        """The one-shot strategy-shift instruction delivered on the next turn."""
+        tool_str = f" on '{self.tool_name}'" if self.tool_name else ""
+        code = self.code or "guardrail_halt"
+        return (
+            f"[System Instruction: The previous turn was halted by a tool-call guardrail{tool_str} "
+            f"({code}) due to repeated unprogressing actions. "
+            "MANDATORY STRATEGY SHIFT: Do NOT immediately emit another inspection or tool call. "
+            "You must first summarize what you have learned so far from your previous attempts, explain the blocker, "
+            "and ask the user for guidance or propose an alternative strategy before executing any more tools.]"
+        )
+
+    def status_line(self) -> str:
+        """The mid-turn status line emitted when a halt stops the turn."""
+        return f"⚠️ Tool guardrail halted {self.tool_name}: {self.code}"
+
+    def synthetic_tool_result(self) -> str:
+        """The role=tool content substituted for a call the guardrail refused.
+
+        The machine-readable keys are a wire contract: this string is persisted
+        into the transcript and replayed to the provider, so only the human-
+        readable ``error`` text may ever change.
+        """
+        return json.dumps(
+            {
+                "error": self.message,
+                "guardrail": self.to_metadata(),
+            },
+            ensure_ascii=False,
+        )
+
+
+@dataclass
+class TurnGuardrailState:
+    """The guardrail account of a single turn.
+
+    Two facts live here and nowhere else: which decision stopped the current
+    turn, and whether that halt's resumption note is still owed to the model.
+    The halt fact is per-turn and is cleared when a turn begins. The owed
+    handoff deliberately survives that clearing, because its whole purpose is
+    to cross the boundary into the following turn.
+    """
+
+    halt_decision: ToolGuardrailDecision | None = None
+    pending_resumption: ToolGuardrailDecision | None = None
+    resumption_delivered: ToolGuardrailDecision | None = None
+
+    def begin_turn(self) -> None:
+        """Open a turn: forget the previous turn's halt, keep any owed handoff."""
+        self.halt_decision = None
+        self.resumption_delivered = None
+
+    def record_halt(self, decision: ToolGuardrailDecision | None) -> bool:
+        """Record the decision that stopped this turn. The first one wins.
+
+        The decision that first stopped the turn is its cause; anything that
+        escalates afterwards is a symptom of the same loop, so reporting the
+        latest would attribute the halt to the wrong guardrail. Returns whether
+        this decision became the recorded cause.
+        """
+        if decision is None or not decision.should_halt:
+            return False
+        if self.halt_decision is None:
+            self.halt_decision = decision
+            return True
+        return False
+
+    def arm_resumption(self, decision: ToolGuardrailDecision | None = None) -> None:
+        """Owe the strategy-shift note to the turn that follows this one.
+
+        Defaults to the decision that stopped this turn; a caller may name the
+        decision explicitly when it knows which halt is being handed over.
+        """
+        chosen = decision if decision is not None else self.halt_decision
+        if chosen is not None:
+            self.pending_resumption = chosen
+
+    def take_pending_resumption(self) -> ToolGuardrailDecision | None:
+        """Consume the owed handoff, if any, so it is delivered exactly once.
+
+        The consumed decision stays readable through ``resumption_delivered`` for
+        the rest of the turn, so "was the model told?" stays a question that can be
+        asked rather than inferred from the handoff being empty -- an empty handoff
+        also means no halt ever happened. The turn finalizer reads it to report
+        the delivery on the turn result.
+        """
+        decision = self.pending_resumption
+        self.pending_resumption = None
+        if decision is not None:
+            self.resumption_delivered = decision
+        return decision
+
 
 _PATH_KEYS = frozenset({"path", "file_path", "filepath", "target_file"})
 
@@ -349,7 +456,6 @@ class ToolCallGuardrailController:
         self._same_tool_failure_counts: dict[str, int] = {}
         self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._history_window: list[ToolCallSignature] = []
-        self._halt_decision: ToolGuardrailDecision | None = None
         # Per-turn runaway-loop cap counters. Reset every turn (this method
         # runs at the start of each run_conversation), so the caps bound a
         # single agent loop rather than accumulating across the session.
@@ -358,10 +464,6 @@ class ToolCallGuardrailController:
         self._last_read_path: str | None = None
         self._last_read_offset: int = 0
         self._consecutive_paging_count: int = 0
-
-    @property
-    def halt_decision(self) -> ToolGuardrailDecision | None:
-        return self._halt_decision
 
     def _record_signature(self, signature: ToolCallSignature) -> None:
         self._history_window.append(signature)
@@ -398,7 +500,6 @@ class ToolCallGuardrailController:
                 count=exact_count,
                 signature=signature,
             )
-            self._halt_decision = decision
             return decision
 
         if self._is_idempotent(tool_name):
@@ -418,7 +519,6 @@ class ToolCallGuardrailController:
                         count=repeat_count,
                         signature=signature,
                     )
-                    self._halt_decision = decision
                     return decision
 
         test_history = self._history_window + [signature]
@@ -436,7 +536,6 @@ class ToolCallGuardrailController:
                 count=seq_repeats,
                 signature=signature,
             )
-            self._halt_decision = decision
             return decision
 
         if tool_name in _PAGING_TOOL_NAMES:
@@ -461,7 +560,6 @@ class ToolCallGuardrailController:
                     count=self._consecutive_paging_count,
                     signature=signature,
                 )
-                self._halt_decision = decision
                 return decision
 
         return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
@@ -502,7 +600,6 @@ class ToolCallGuardrailController:
                     count=same_count,
                     signature=signature,
                 )
-                self._halt_decision = decision
                 return decision
 
             if self.config.warnings_enabled and exact_count >= self.config.exact_failure_warn_after:
@@ -546,7 +643,6 @@ class ToolCallGuardrailController:
                 count=seq_repeats,
                 signature=signature,
             )
-            self._halt_decision = decision
             return decision
 
         if self.config.warnings_enabled and seq_repeats >= self.config.sequence_repeat_warn_after:
@@ -593,7 +689,6 @@ class ToolCallGuardrailController:
                     count=self._consecutive_paging_count,
                     signature=signature,
                 )
-                self._halt_decision = decision
                 return decision
 
             if (
@@ -676,7 +771,6 @@ class ToolCallGuardrailController:
                     count=self._turn_web_search_count,
                     signature=signature,
                 )
-                self._halt_decision = decision
                 return decision
             self._turn_web_search_count += 1
             return None
@@ -705,23 +799,11 @@ class ToolCallGuardrailController:
                     count=self._turn_subagent_count,
                     signature=signature,
                 )
-                self._halt_decision = decision
                 return decision
             self._turn_subagent_count += spawn_count
             return None
 
         return None
-
-
-def toolguard_synthetic_result(decision: ToolGuardrailDecision) -> str:
-    """Build a synthetic role=tool content string for a blocked tool call."""
-    return json.dumps(
-        {
-            "error": decision.message,
-            "guardrail": decision.to_metadata(),
-        },
-        ensure_ascii=False,
-    )
 
 
 def append_toolguard_guidance(result: str, decision: ToolGuardrailDecision) -> str:

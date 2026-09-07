@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import threading
 import types
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from agent.context_compressor import ContextCompressor
+from agent.tool_guardrails import ToolGuardrailDecision, TurnGuardrailState
 from agent.turn_context import TurnContext, build_turn_context
 from hermes_state import SessionDB
 
@@ -78,10 +78,10 @@ class _FakeAgent:
         self._user_turn_count = 0
         self._todo_store = _FakeTodoStore()
         self._tool_guardrails = _FakeGuardrails()
-        # The resumption handoff: set by the turn finalizer after a guardrail
-        # halt, consumed once by the prologue. Declared so the fake states what
-        # it carries rather than relying on getattr defaults.
-        self._pending_guardrail_halt_resumption: Any = None
+        # The turn's guardrail facts. The real value object, not a stub: it has
+        # no dependencies, and carrying the real thing means the prologue's read
+        # path is genuinely exercised instead of satisfied by a mock default.
+        self._guardrail_state = TurnGuardrailState()
         self._compression_warning = None
         self._emit_warning = MagicMock()
         self._last_ctx_overflow_warn = None
@@ -462,10 +462,12 @@ def test_prologue_does_not_title_machine_driven_runs(platform):
 def test_guardrail_halt_resumption_injects_strategy_shift_instruction():
     from agent.tool_guardrails import ToolGuardrailDecision
     agent = _FakeAgent()
-    agent._pending_guardrail_halt_resumption = ToolGuardrailDecision(
-        action="halt",
-        code="sequence_repeat_halt",
-        tool_name="terminal",
+    agent._guardrail_state.arm_resumption(
+        ToolGuardrailDecision(
+            action="halt",
+            code="sequence_repeat_halt",
+            tool_name="terminal",
+        )
     )
     ctx = _build(agent, user_message="what should we do next?")
     user_msg = ctx.messages[-1]
@@ -473,8 +475,8 @@ def test_guardrail_halt_resumption_injects_strategy_shift_instruction():
     api_content = user_msg["api_content"]
     assert "MANDATORY STRATEGY SHIFT: Do NOT immediately emit another inspection or tool call." in api_content
     assert "summarize what you have learned so far" in api_content
-    # One-shot: cleared after consumption
-    assert agent._pending_guardrail_halt_resumption is None
+    # One-shot: spent, so a later turn is not instructed again.
+    assert agent._guardrail_state.pending_resumption is None
 
 
 def test_discussing_guardrails_in_prose_does_not_fabricate_a_strategy_shift():

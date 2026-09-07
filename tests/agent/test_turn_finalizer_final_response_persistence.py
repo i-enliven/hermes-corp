@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from typing import Any
 
+from agent.tool_guardrails import TurnGuardrailState
 from agent.turn_finalizer import finalize_turn
 
 
@@ -25,7 +26,7 @@ class FakeAgent:
         self.session_estimated_cost_usd = 0
         self.session_cost_status = "unknown"
         self.session_cost_source = "test"
-        self._tool_guardrail_halt_decision = None
+        self._guardrail_state = TurnGuardrailState()
         self._interrupt_message = None
         self._response_was_previewed = True
         self._skill_nudge_interval = 0

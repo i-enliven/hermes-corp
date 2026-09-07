@@ -10,6 +10,7 @@ traceback and lost the whole turn.
 
 import pytest
 
+from agent.tool_guardrails import TurnGuardrailState
 from agent.turn_finalizer import finalize_turn
 
 
@@ -39,7 +40,7 @@ class _StubAgent:
         self.platform = "cli"
         self._interrupt_requested = False
         self._interrupt_message = None
-        self._tool_guardrail_halt_decision = None
+        self._guardrail_state = TurnGuardrailState()
         self._response_was_previewed = False
         self._skill_nudge_interval = 0
         self._iters_since_skill = 0

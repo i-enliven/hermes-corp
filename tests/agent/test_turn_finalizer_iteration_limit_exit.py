@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from agent.tool_guardrails import TurnGuardrailState
 from agent.turn_finalizer import finalize_turn
 
 
@@ -37,7 +38,7 @@ class _LimitAgent:
         self.session_estimated_cost_usd = 0
         self.session_cost_status = "unknown"
         self.session_cost_source = "test"
-        self._tool_guardrail_halt_decision = None
+        self._guardrail_state = TurnGuardrailState()
         self._interrupt_message = None
         self._response_was_previewed = False
         self._skill_nudge_interval = 0

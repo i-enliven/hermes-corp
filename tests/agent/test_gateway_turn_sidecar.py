@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
+from agent.tool_guardrails import TurnGuardrailState
 from agent.turn_context import (
     append_notes_to_multimodal_content,
     build_turn_context,
@@ -63,6 +64,9 @@ class _FakeAgent:
         self._user_turn_count = 0
         self._todo_store = _FakeTodoStore()
         self._tool_guardrails = _FakeGuardrails()
+        # Real value object: the prologue reads the owed resumption handoff
+        # through it, so the fake must carry the genuine article.
+        self._guardrail_state = TurnGuardrailState()
         self._compression_warning = None
         self._interrupt_requested = False
         self._memory_write_origin = "assistant_tool"

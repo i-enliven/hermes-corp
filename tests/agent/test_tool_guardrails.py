@@ -1,14 +1,220 @@
 """Pure tool-call guardrail primitive tests."""
 
 import json
+from dataclasses import FrozenInstanceError
+from typing import Any
+
+import pytest
 
 from agent.tool_guardrails import (
     ToolCallGuardrailConfig,
     ToolCallGuardrailController,
     ToolCallSignature,
+    ToolGuardrailDecision,
+    TurnGuardrailState,
     canonical_tool_args,
     classify_tool_failure,
 )
+
+
+# ── The halt decision renders itself ────────────────────────────────────────
+#
+# Every user- and model-facing string a guardrail halt produces is a pure
+# function of the decision that caused it, so all four are testable without
+# constructing an agent, and there is exactly one place each is written.
+
+
+def _halt_decision(**overrides: Any) -> ToolGuardrailDecision:
+    fields: dict[str, Any] = {
+        "action": "halt",
+        "code": "sequence_repeat_halt",
+        "message": "repeating without progress",
+        "tool_name": "terminal",
+        "count": 4,
+    }
+    fields.update(overrides)
+    return ToolGuardrailDecision(**fields)
+
+
+def test_halt_decision_renders_the_halt_prose_from_its_own_fields():
+    prose = _halt_decision().halt_prose()
+
+    assert prose == (
+        "I stopped retrying terminal because it hit the tool-call guardrail "
+        "(sequence_repeat_halt) after 4 repeated non-progressing attempts. "
+        "The last tool result explains the blocker; the next step is to change "
+        "strategy instead of repeating the same call."
+    )
+
+
+def test_halt_prose_names_a_tool_when_the_decision_does_not():
+    # A decision can halt without attributing a tool; the sentence stays readable.
+    assert "a tool" in _halt_decision(tool_name="").halt_prose()
+
+
+def test_halt_decision_renders_the_resumption_note_naming_tool_and_code():
+    note = _halt_decision().resumption_note()
+
+    assert note == (
+        "[System Instruction: The previous turn was halted by a tool-call guardrail "
+        "on 'terminal' (sequence_repeat_halt) due to repeated unprogressing actions. "
+        "MANDATORY STRATEGY SHIFT: Do NOT immediately emit another inspection or tool call. "
+        "You must first summarize what you have learned so far from your previous attempts, "
+        "explain the blocker, and ask the user for guidance or propose an alternative strategy "
+        "before executing any more tools.]"
+    )
+
+
+def test_resumption_note_omits_the_tool_clause_when_no_tool_is_named():
+    # One renderer serves both the named and unnamed case; the wording is shared,
+    # which is what stops the two variants drifting apart again.
+    note = _halt_decision(tool_name="").resumption_note()
+
+    assert "on ''" not in note
+    assert "guardrail (sequence_repeat_halt)" in note
+    assert "MANDATORY STRATEGY SHIFT" in note
+
+
+def test_halt_decision_renders_the_status_line():
+    assert _halt_decision().status_line() == (
+        "⚠️ Tool guardrail halted terminal: sequence_repeat_halt"
+    )
+
+
+def test_synthetic_tool_result_keeps_its_machine_readable_key_set():
+    # The synthetic result is persisted into the transcript and replayed to the
+    # provider, so its shape is a wire contract: the keys are frozen and only the
+    # human-readable text inside them may ever change.
+    decision = _halt_decision(
+        action="block",
+        code="repeated_exact_failure_block",
+        message="boom keeps repeating",
+        signature=ToolCallSignature(tool_name="terminal", args_hash="abc123"),
+    )
+
+    payload = json.loads(decision.synthetic_tool_result())
+
+    assert set(payload) == {"error", "guardrail"}
+    assert payload["error"] == "boom keeps repeating"
+    assert set(payload["guardrail"]) == {
+        "action",
+        "code",
+        "message",
+        "tool_name",
+        "count",
+        "signature",
+    }
+
+
+# ── One owner for the turn's guardrail facts ────────────────────────────────
+
+
+def test_turn_guardrail_state_reports_the_first_decision_that_stopped_the_turn():
+    # Two guardrails can stop one turn. The cause reported to the user is the
+    # first one that stopped it, not whichever was recorded last.
+    state = TurnGuardrailState()
+    first = _halt_decision(code="repeated_exact_failure_block", tool_name="terminal")
+    second = _halt_decision(code="sequence_repeat_halt", tool_name="read_file")
+
+    state.record_halt(first)
+    state.record_halt(second)
+
+    assert state.halt_decision is first
+
+
+def test_turn_guardrail_state_ignores_a_decision_that_does_not_stop_the_turn():
+    state = TurnGuardrailState()
+
+    state.record_halt(_halt_decision(action="allow", code="allow"))
+    state.record_halt(_halt_decision(action="warn", code="sequence_repeat_warning"))
+
+    assert state.halt_decision is None
+
+
+def test_turn_guardrail_state_hands_the_resumption_note_over_exactly_once():
+    # The handoff crosses the turn boundary: armed when the halted turn ends,
+    # read once by the following turn's prologue, then spent.
+    state = TurnGuardrailState()
+    decision = _halt_decision()
+    state.arm_resumption(decision)
+
+    assert state.take_pending_resumption() is decision
+    assert state.take_pending_resumption() is None
+
+
+def test_turn_guardrail_state_begins_a_turn_with_no_halt_but_keeps_the_handoff():
+    # Clearing the halt at the turn boundary must not discard a handoff armed by
+    # the previous turn: the prologue of the turn that begins has not read it yet.
+    state = TurnGuardrailState()
+    decision = _halt_decision()
+    state.record_halt(decision)
+    state.arm_resumption(decision)
+
+    state.begin_turn()
+
+    assert state.halt_decision is None
+    assert state.take_pending_resumption() is decision
+
+
+def test_a_delivered_note_stays_reportable_after_being_consumed():
+    """Consuming the handoff must not erase the fact that it was delivered.
+
+    An empty handoff means either "delivered" or "there was never a halt to
+    deliver for", so the two have to be distinguishable or "was the model told
+    to change strategy?" cannot be asked of the turn at all.
+    """
+    state = TurnGuardrailState()
+    decision = _halt_decision()
+    state.arm_resumption(decision)
+
+    assert state.take_pending_resumption() is decision
+    assert state.pending_resumption is None
+    assert state.resumption_delivered is decision
+
+    # A turn that never halted reports neither: absence, not a spent delivery.
+    assert TurnGuardrailState().resumption_delivered is None
+
+
+def test_beginning_a_turn_clears_the_previous_turns_delivery_record():
+    state = TurnGuardrailState()
+    state.arm_resumption(_halt_decision())
+    state.take_pending_resumption()
+    assert state.resumption_delivered is not None
+
+    state.begin_turn()
+
+    assert state.resumption_delivered is None
+
+
+def test_halt_decision_is_immutable_once_produced():
+    """The decision that stopped a turn cannot be rewritten by a later module.
+
+    The halt fact used to be reachable as a plain attribute that any module in
+    the journey could assign to, which is how the two stores drifted apart. The
+    decision is a frozen record, so the cause reported to the user is the one the
+    guardrail produced.
+    """
+    decision = _halt_decision()
+
+    with pytest.raises(FrozenInstanceError):
+        decision.code = "rewritten_by_a_downstream_module"
+
+    with pytest.raises(FrozenInstanceError):
+        decision.action = "allow"
+
+
+def test_controller_keeps_no_halt_store_of_its_own():
+    # The halt fact has exactly one home. The controller counts and decides; it
+    # must not also keep a copy, which is how two stores came to disagree about
+    # which guardrail stopped a turn.
+    controller = ToolCallGuardrailController(ToolCallGuardrailConfig(hard_stop_enabled=True))
+    args = {"query": "same"}
+    for _ in range(3):
+        controller.after_call("web_search", args, '{"error":"boom"}', failed=True)
+    controller.before_call("web_search", args)
+
+    assert not hasattr(controller, "_halt_decision")
+    assert not hasattr(controller, "halt_decision")
 
 
 def test_tool_call_signature_hashes_canonical_nested_unicode_args_without_exposing_raw_args():
@@ -78,7 +284,9 @@ def test_default_repeated_identical_failed_call_warns_without_blocking():
     assert [d.action for d in decisions[1:]] == ["warn", "warn", "warn", "warn"]
     assert {d.code for d in decisions[1:]} == {"repeated_exact_failure_warning"}
     assert controller.before_call("web_search", args).action == "allow"
-    assert controller.halt_decision is None
+    # Nothing escalated to a stop: every decision above allowed execution, which
+    # is the whole of what the controller reports. It keeps no halt record of
+    # its own — the turn's guardrail state is the single home of that fact.
 
 
 def test_hard_stop_enabled_blocks_repeated_exact_failure_before_next_execution():

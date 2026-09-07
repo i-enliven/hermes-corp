@@ -7167,13 +7167,11 @@ def run_conversation(
                     failed = True
                     break
 
-                if agent._tool_guardrail_halt_decision is not None:
-                    decision = agent._tool_guardrail_halt_decision
+                decision = agent._guardrail_state.halt_decision
+                if decision is not None:
                     _turn_exit_reason = "guardrail_halt"
-                    final_response = agent._toolguard_controlled_halt_response(decision)
-                    agent._emit_status(
-                        f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}"
-                    )
+                    final_response = decision.halt_prose()
+                    agent._emit_status(decision.status_line())
                     append_message(messages, {"role": "assistant", "content": final_response})
                     # Emit the halt message to the client so it's not
                     # indistinguishable from a crash.  The stream display

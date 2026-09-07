@@ -3,8 +3,10 @@
 import json
 import uuid
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
+from agent.tool_guardrails import ToolGuardrailDecision, TurnGuardrailState
 from run_agent import AIAgent
 
 
@@ -109,7 +111,8 @@ def test_default_sequential_path_warns_repeated_exact_failure_without_blocking_e
     assert messages[0]["tool_call_id"] == "c-soft"
     assert "repeated_exact_failure_warning" in messages[0]["content"]
     assert "repeated_exact_failure_block" not in messages[0]["content"]
-    assert agent._tool_guardrail_halt_decision is None
+    # Nothing stopped the turn: the guardrail account of the turn is empty.
+    assert agent._guardrail_state.halt_decision is None
 
 
 def test_config_enabled_hard_stop_blocks_repeated_exact_failure_before_execution():
@@ -344,6 +347,129 @@ def test_plugin_pre_tool_block_wins_without_counting_as_toolguard_block():
     assert agent._tool_guardrails.before_call("web_search", args).action == "allow"
 
 
+def test_a_halted_turn_reports_its_guardrail_record_and_arms_the_resumption():
+    """The turn result's guardrail record has never had a positive assertion.
+
+    Every stub pinned the halt field to empty and the only assertion in this
+    file was the negative one above, so the whole shape of what a halted turn
+    reports was uncaught. Assert presence, the reported fields, and that the
+    following turn is owed the strategy-shift note.
+    """
+    agent = _make_agent("web_search", max_iterations=10, config=_hard_stop_config())
+    same_args = {"query": "same"}
+    agent.client.chat.completions.create.side_effect = [
+        _mock_response(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[_mock_tool_call("web_search", json.dumps(same_args), f"c{i}")],
+        )
+        for i in range(1, 10)
+    ]
+    agent._disable_streaming = True
+
+    with (
+        patch("run_agent.handle_function_call", return_value=json.dumps({"error": "boom"})),
+        patch.object(agent, "_persist_session"),
+        patch.object(agent, "_save_trajectory"),
+        patch.object(agent, "_cleanup_task_resources"),
+    ):
+        result = agent.run_conversation("search repeatedly")
+
+    assert result["turn_exit_reason"] == "guardrail_halt"
+    # The record the user-facing surfaces read from.
+    assert "guardrail" in result
+    assert result["guardrail"]["action"] in {"block", "halt"}
+    assert result["guardrail"]["tool_name"] == "web_search"
+    assert result["guardrail"]["count"] >= 1
+    # And the handoff to the turn that follows is armed, exactly once.
+    assert agent._guardrail_state.pending_resumption is not None
+
+
+def test_the_first_decision_that_stops_the_turn_is_the_one_reported():
+    """Two guardrails can stop one turn; the cause reported is the first.
+
+    The controller used to keep its own halt, last-writer-wins, while the agent
+    kept one that was first-writer-wins, so which guardrail the user was told
+    about depended on the order the two stores happened to be written. Both
+    writes now go through one owner and the first decision to stop the turn wins.
+    """
+    state = TurnGuardrailState()
+    first = _halt_decision(code="repeated_exact_failure_block", tool_name="web_search")
+    second = _halt_decision(code="sequence_repeat_block", tool_name="read_file")
+
+    assert state.record_halt(first) is True
+    assert state.record_halt(second) is False
+    assert state.halt_decision is first
+
+    # The handoff carries the cause, not the later escalation.
+    state.arm_resumption()
+    assert state.take_pending_resumption() is first
+
+
+def test_the_first_decision_to_stop_the_turn_is_the_one_the_user_is_told_about():
+    """Two guardrails stop one turn; the cause reported is the first, not the last.
+
+    Driven through the two writer paths the tool pipeline itself uses, in the
+    order it uses them: the observation path that watches a finished call
+    (``after_call``), then the pre-flight path that refuses a call (``before_call``).
+    Both decisions are produced by the real controller under a real config, so
+    neither is fabricated.
+
+    The same-tool failure ceiling is reached first and halts; the exact-failure
+    ceiling is reached next and blocks. The two arrive from different writer paths
+    with different codes, so which one the user is told about depends entirely on
+    precedence. Before this change the controller kept its own last-writer-wins
+    copy while the agent kept a first-writer-wins copy, and the answer depended on
+    which store happened to be read.
+    """
+    config = {
+        "tool_loop_guardrails": {
+            "warnings_enabled": False,
+            "hard_stop_enabled": True,
+            "hard_stop_after": {"exact_failure": 2, "same_tool_failure": 2},
+        }
+    }
+    agent = _make_agent("terminal", max_iterations=10, config=config)
+    args = {"command": "false"}
+
+    # Two identical failing calls observed through the pipeline. The second
+    # reaches the same-tool ceiling and halts: that is the turn's cause.
+    agent._append_guardrail_observation(
+        "terminal", dict(args), json.dumps({"exit_code": 1}), failed=True
+    )
+    agent._append_guardrail_observation(
+        "terminal", dict(args), json.dumps({"exit_code": 1}), failed=True
+    )
+    cause = agent._guardrail_state.halt_decision
+    assert cause is not None
+    assert cause.code == "same_tool_failure_halt"
+
+    # A third attempt is refused before it runs, raising a later escalation of
+    # the same loop through the other writer path.
+    escalation = agent._tool_guardrails.before_call("terminal", dict(args))
+    assert escalation.should_halt
+    assert escalation.code == "repeated_exact_failure_block"
+    agent._guardrail_block_result(escalation)
+
+    # The later escalation must not displace the decision that first stopped the
+    # turn: that is the one the loop renders, the finalizer reports, and the
+    # following turn's resumption note names.
+    assert agent._guardrail_state.halt_decision is cause
+    assert agent._guardrail_state.halt_decision.code == "same_tool_failure_halt"
+
+
+def _halt_decision(**overrides: Any) -> ToolGuardrailDecision:
+    fields: dict[str, Any] = {
+        "action": "halt",
+        "code": "sequence_repeat_halt",
+        "message": "repeating without progress",
+        "tool_name": "terminal",
+        "count": 4,
+    }
+    fields.update(overrides)
+    return ToolGuardrailDecision(**fields)
+
+
 def test_default_run_conversation_warns_without_guardrail_halt():
     agent = _make_agent("web_search", max_iterations=10)
     same_args = {"query": "same"}
@@ -571,7 +697,8 @@ def test_turn_resumption_after_guardrail_halt_injects_strategy_shift():
         result1 = agent.run_conversation("search repeatedly")
 
     assert result1["turn_exit_reason"] == "guardrail_halt"
-    assert agent._pending_guardrail_halt_resumption is not None
+    # The halt was handed over to the turn that follows.
+    assert agent._guardrail_state.pending_resumption is not None
 
     # Turn 2: user replies "what should we do next?"
     captured_messages = []
@@ -595,3 +722,6 @@ def test_turn_resumption_after_guardrail_halt_injects_strategy_shift():
     last_user_content = user_msgs[-1].get("content", "")
     assert "MANDATORY STRATEGY SHIFT: Do NOT immediately emit another inspection or tool call." in last_user_content
     assert "summarize what you have learned so far" in last_user_content
+    # The turn that received the note reports that it delivered one, so the
+    # handoff's whole journey is observable from the two results alone.
+    assert result2["guardrail"]["resumption_delivered"] is True

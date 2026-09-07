@@ -165,19 +165,10 @@ def consume_guardrail_resumption_note(agent: Any) -> str:
     Delivered on the user message via the api_content sidecar to maintain
     byte-stable prefix caching and strict role alternation.
     """
-    halt_decision = getattr(agent, "_pending_guardrail_halt_resumption", None)
+    halt_decision = agent._guardrail_state.take_pending_resumption()
     if halt_decision is None:
         return ""
-
-    agent._pending_guardrail_halt_resumption = None
-    tool_str = f" on '{halt_decision.tool_name}'" if getattr(halt_decision, "tool_name", None) else ""
-    return (
-        f"[System Instruction: The previous turn was halted by a tool-call guardrail{tool_str} "
-        f"({getattr(halt_decision, 'code', 'guardrail_halt')}) due to repeated unprogressing actions. "
-        "MANDATORY STRATEGY SHIFT: Do NOT immediately emit another inspection or tool call. "
-        "You must first summarize what you have learned so far from your previous attempts, explain the blocker, "
-        "and ask the user for guidance or propose an alternative strategy before executing any more tools.]"
-    )
+    return halt_decision.resumption_note()
 
 
 def append_notes_to_multimodal_content(content: Any, notes: str) -> bool:
@@ -609,7 +600,7 @@ def build_turn_context(
     agent._mute_post_response = False
     agent._unicode_sanitization_passes = 0
     agent._tool_guardrails.reset_for_turn()
-    agent._tool_guardrail_halt_decision = None
+    agent._guardrail_state.begin_turn()
     _reset_consol = getattr(agent._memory_store, "reset_consolidation_failures", None)
     if callable(_reset_consol):
         _reset_consol()
