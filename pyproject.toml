@@ -172,6 +172,7 @@ dependencies = [
   "microsoft-teams-apps==2.0.13.4",
   "dependency-injector==4.49.1",
   "docstring-parser==0.18.0",
+  "ipykernel>=7.3.0",
 ]
 
 [project.optional-dependencies]
